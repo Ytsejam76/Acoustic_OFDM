@@ -17,6 +17,9 @@ function [tx_audio, meta] = ofdm_encoder(payload, p)
     if ~isfield(p, 'modulation')
         p.modulation = 'BPSK';
     end
+    if ~isfield(p, 'disable_modulation')
+        p.disable_modulation = false;
+    end
 
     chunks = split_payload(payload, p.packet_payload_bytes);
     num_packets = numel(chunks);
@@ -79,7 +82,11 @@ function [tx_audio, dbg] = tx_one_packet(pkt_bytes, p)
     xsync = [syncA; syncA];
 
     xbb = [xsync; xtrain_cp; xdata];
-    passband = iq_upconvert(xbb, p.fs, p.fc);
+    if p.disable_modulation
+        passband = xbb;
+    else
+        passband = iq_upconvert(xbb, p.fs, p.fc);
+    end
     wake = make_wake_tone(p);
     guard = zeros(round(p.wake_guard_ms * 1e-3 * p.fs), 1);
 
@@ -100,9 +107,9 @@ end
 function p = default_params()
     p.fs = 48000;
     p.fc = 17000;
-    p.Nfft = 32;
-    p.Ncp = 8;
-    p.used_bins = [3 4 5 6 7 8 9 10];
+    p.Nfft = 96;
+    p.Ncp = 24;
+    p.used_bins = [2 3 4 5];
     p.modulation = 'BPSK';
     p.wake_ms = 12;
     p.wake_freq = 16500;
@@ -110,6 +117,7 @@ function p = default_params()
     p.sync_half_len = 32;
     p.packet_payload_bytes = 24;
     p.session_id = uint16(1234);
+    p.disable_modulation = false;
 end
 
 function chunks = split_payload(payload, chunk_size)

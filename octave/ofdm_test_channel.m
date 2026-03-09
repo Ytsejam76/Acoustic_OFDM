@@ -28,22 +28,75 @@ function [result, dbg, tx_audio, rx_audio, payload, p] = ofdm_test_channel(varar
     [tx_audio, enc_meta] = ofdm_encoder(payload, p); %#ok<NASGU>
     rx_audio = simulate_audio_channel(tx_audio, p);
     [result, dbg] = ofdm_decoder(rx_audio, p);
+    [ber, bit_errors, bit_total] = compute_payload_ber(payload, result.payload);
+    result.ber = ber;
+    result.bit_errors = bit_errors;
+    result.bit_total_compared = bit_total;
 
-    fprintf('\n==== TEST CHANNEL RESULT ====\n');
-    fprintf('Modulation: %s\n', p.modulation);
-    fprintf('Payload bytes: %d\n', numel(payload));
-    fprintf('Decoded packets: %d / %d\n', result.num_packets_ok, result.num_packets_total);
-    fprintf('Success: %d\n', result.success);
-    if result.success
-        fprintf('Payload matches: %d\n', isequal(result.payload(:), payload(:)));
+    if p.verbose
+        fprintf('\n==== TEST CHANNEL RESULT ====\n');
+        fprintf('Modulation: %s\n', p.modulation);
+        fprintf('Payload bytes: %d\n', numel(payload));
+        fprintf('Decoded packets: %d / %d\n', result.num_packets_ok, result.num_packets_total);
+        fprintf('Success: %d\n', result.success);
+        if result.success
+            fprintf('Payload matches: %d\n', isequal(result.payload(:), payload(:)));
+        end
+        fprintf('Channel SNR: %.1f dB\n', p.snr_db);
+        fprintf('Channel CFO: %.2f Hz\n', p.cfo_hz);
+        fprintf('Timing offset: %d samples\n', p.timing_offset);
+        if isnan(result.ber)
+            fprintf('BER: n/a (no overlapping decoded bytes)\n');
+        else
+            fprintf('BER: %.6f (%d / %d bit errors)\n', result.ber, result.bit_errors, result.bit_total_compared);
+        end
     end
-    fprintf('Channel SNR: %.1f dB\n', p.snr_db);
-    fprintf('Channel CFO: %.2f Hz\n', p.cfo_hz);
-    fprintf('Timing offset: %d samples\n', p.timing_offset);
 
+    fig_handles = [];
     if p.make_plots
-        make_plots(tx_audio, rx_audio, dbg, p);
+        fig_handles = make_plots(tx_audio, rx_audio, dbg, p);
     end
+
+    if p.save_images || p.save_decoder_constellation
+        ensure_out_dir(p.out_dir);
+    end
+
+    if p.save_images
+        save_plot_images(fig_handles, p.out_dir);
+    end
+
+    if p.save_decoder_constellation
+        save_decoder_constellation(dbg, p.out_dir);
+    end
+
+    if p.pause_before_exit
+        if p.pause_seconds < 0
+            fprintf('\nPress any key to continue...\n');
+            pause;
+        else
+            fprintf('\nPausing for %.2f seconds...\n', p.pause_seconds);
+            pause(p.pause_seconds);
+        end
+    end
+end
+
+function [ber, bit_errors, bit_total] = compute_payload_ber(tx_payload, rx_payload)
+    tx_payload = uint8(tx_payload(:));
+    rx_payload = uint8(rx_payload(:));
+    nbytes = min(numel(tx_payload), numel(rx_payload));
+    if nbytes == 0
+        ber = NaN;
+        bit_errors = 0;
+        bit_total = 0;
+        return;
+    end
+
+    tx_use = tx_payload(1:nbytes);
+    rx_use = rx_payload(1:nbytes);
+    xor_bytes = bitxor(tx_use, rx_use);
+    bit_errors = sum(arrayfun(@(x) sum(bitget(x, 1:8)), xor_bytes));
+    bit_total = 8 * nbytes;
+    ber = double(bit_errors) / double(bit_total);
 end
 
 function y = simulate_audio_channel(x, p)
@@ -55,9 +108,13 @@ function y = simulate_audio_channel(x, p)
         y = filter(h, 1, y);
     end
 
-    % Small passband frequency error.
+    % Frequency error.
     n = (0:length(y)-1).';
-    y = real(y .* exp(1j * 2*pi * p.cfo_hz * n / p.fs));
+    if p.disable_modulation
+        y = y .* exp(1j * 2*pi * p.cfo_hz * n / p.fs);
+    else
+        y = real(y .* exp(1j * 2*pi * p.cfo_hz * n / p.fs));
+    end
 
     % Optional amplitude ripple.
     if p.apply_am_ripple
@@ -65,9 +122,13 @@ function y = simulate_audio_channel(x, p)
     end
 
     % AWGN.
-    Ps = mean(y.^2);
+    Ps = mean(abs(y).^2);
     Pn = Ps / (10^(p.snr_db/10));
-    y = y + sqrt(Pn) * randn(size(y));
+    if isreal(y)
+        y = y + sqrt(Pn) * randn(size(y));
+    else
+        y = y + sqrt(Pn/2) * (randn(size(y)) + 1j*randn(size(y)));
+    end
 
     m = max(abs(y));
     if m > 0
@@ -75,21 +136,23 @@ function y = simulate_audio_channel(x, p)
     end
 end
 
-function make_plots(tx_audio, rx_audio, dbg, p)
-    figure;
+function fig_handles = make_plots(tx_audio, rx_audio, dbg, p)
+    fig_handles = [];
+
+    fig_handles(end+1) = figure('name', 'tx_waveform');
     plot(tx_audio);
     grid on;
     title('TX audio waveform');
     xlabel('Sample'); ylabel('Amplitude');
 
-    figure;
+    fig_handles(end+1) = figure('name', 'rx_waveform');
     plot(rx_audio);
     grid on;
     title('RX audio waveform');
     xlabel('Sample'); ylabel('Amplitude');
 
     if isfield(dbg, 'sync_metric') && ~isempty(dbg.sync_metric)
-        figure;
+        fig_handles(end+1) = figure('name', 'sync_metric');
         plot(dbg.sync_metric);
         grid on;
         title(sprintf('Sync metric (peak at %d, CFO est %.2f Hz)', dbg.peak_idx, dbg.cfo_est_hz));
@@ -97,7 +160,7 @@ function make_plots(tx_audio, rx_audio, dbg, p)
     end
 
     if isfield(dbg, 'rx_syms_raw') && ~isempty(dbg.rx_syms_raw)
-        figure;
+        fig_handles(end+1) = figure('name', 'constellation_before_eq');
         plot(real(dbg.rx_syms_raw), imag(dbg.rx_syms_raw), '.');
         grid on; axis equal;
         xlabel('In-Phase'); ylabel('Quadrature');
@@ -105,7 +168,7 @@ function make_plots(tx_audio, rx_audio, dbg, p)
     end
 
     if isfield(dbg, 'rx_syms_eq') && ~isempty(dbg.rx_syms_eq)
-        figure;
+        fig_handles(end+1) = figure('name', 'constellation_after_eq');
         plot(real(dbg.rx_syms_eq), imag(dbg.rx_syms_eq), 'x');
         grid on; axis equal;
         xlabel('In-Phase'); ylabel('Quadrature');
@@ -115,6 +178,49 @@ function make_plots(tx_audio, rx_audio, dbg, p)
         plot(real(ideal), imag(ideal), 'ro', 'markersize', 10, 'linewidth', 2);
         hold off;
     end
+end
+
+function ensure_out_dir(out_dir)
+    if exist(out_dir, 'dir') ~= 7
+        mkdir(out_dir);
+    end
+end
+
+function save_plot_images(fig_handles, out_dir)
+    for i = 1:numel(fig_handles)
+        h = fig_handles(i);
+        if ~ishandle(h)
+            continue;
+        end
+        fig_name = get(h, 'name');
+        if isempty(fig_name)
+            fig_name = sprintf('figure_%02d', i);
+        end
+        png_path = fullfile(out_dir, [fig_name '.png']);
+        saveas(h, png_path);
+    end
+    fprintf('Saved %d plot image(s) in: %s\n', numel(fig_handles), out_dir);
+end
+
+function save_decoder_constellation(dbg, out_dir)
+    if isfield(dbg, 'rx_syms_eq') && ~isempty(dbg.rx_syms_eq)
+        sym = dbg.rx_syms_eq(:); %#ok<NASGU>
+        basename = 'decoder_constellation_eq';
+    elseif isfield(dbg, 'rx_syms_raw') && ~isempty(dbg.rx_syms_raw)
+        sym = dbg.rx_syms_raw(:); %#ok<NASGU>
+        basename = 'decoder_constellation_raw';
+    else
+        fprintf('Decoder constellation not available: no symbols in dbg.\n');
+        return;
+    end
+
+    mat_path = fullfile(out_dir, [basename '.mat']);
+    save(mat_path, 'sym');
+
+    csv_data = [real(sym), imag(sym)];
+    csv_path = fullfile(out_dir, [basename '.csv']);
+    csvwrite(csv_path, csv_data);
+    fprintf('Saved decoder constellation in: %s and %s\n', mat_path, csv_path);
 end
 
 function ideal = ideal_constellation(modulation)
@@ -131,9 +237,9 @@ end
 function p = default_params()
     p.fs = 48000;
     p.fc = 17000;
-    p.Nfft = 32;
-    p.Ncp = 8;
-    p.used_bins = [3 4 5 6 7 8 9 10];
+    p.Nfft = 96;
+    p.Ncp = 24;
+    p.used_bins = [2 3 4 5];
     p.modulation = 'BPSK';
     p.wake_ms = 12;
     p.wake_freq = 16500;
@@ -142,8 +248,12 @@ function p = default_params()
     p.packet_payload_bytes = 24;
     p.payload_bytes = 64;
     p.session_id = uint16(1234);
-    p.detect_threshold = 0.35;
+    p.detect_threshold = 0.12;
+    p.wake_search_len = 6000;
+    p.wake_ref_pre_ms = 8;
     p.sync_search_len = 500;
+    p.sync_peak_rel_threshold = 0.80;
+    p.sync_metric_abs_threshold = 0.02;
 
     p.snr_db = 24;
     p.cfo_hz = 4;
@@ -153,4 +263,11 @@ function p = default_params()
     p.am_ripple_depth = 0.03;
     p.am_ripple_hz = 40;
     p.make_plots = true;
+    p.pause_before_exit = true;
+    p.pause_seconds = -1;
+    p.save_images = true;
+    p.save_decoder_constellation = true;
+    p.out_dir = fullfile(pwd, 'output_plots');
+    p.disable_modulation = false;
+    p.verbose = true;
 end

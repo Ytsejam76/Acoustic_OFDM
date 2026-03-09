@@ -13,7 +13,13 @@ function [result, dbg] = ofdm_decoder(rx_audio, p)
     last_dbg = struct();
 
     while pos < length(rx_audio)
-        [found, start_idx, score] = find_wake_tone(rx_audio, pos, p);
+        if isfield(p, 'oracle_wake_start') && ~isempty(p.oracle_wake_start) && pos == 1
+            found = true;
+            start_idx = max(1, round(double(p.oracle_wake_start)));
+            score = NaN;
+        else
+            [found, start_idx, score] = find_wake_tone(rx_audio, pos, p);
+        end
         if ~found
             break;
         end
@@ -49,17 +55,35 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
         return;
     end
 
-    search_end = min(length(rx_segment), coarse_start + p.sync_search_len + 4000);
+    sym_len = p.Nfft + p.Ncp;
+    bps = bits_per_modulation(p.modulation);
+    max_payload_bytes = p.packet_payload_bytes + 16;
+    max_bits = max_payload_bytes * 8;
+    max_data_ofdm = ceil(max_bits / (numel(p.used_bins) * bps)) + 4;
+    needed_after_sync = 2*p.sync_half_len + sym_len + max_data_ofdm*sym_len;
+    search_end = min(length(rx_segment), coarse_start + p.sync_search_len + needed_after_sync);
     chunk = rx_segment(coarse_start:search_end);
-    rbb = iq_downconvert_and_lpf(chunk, p.fs, p.fc);
+    rbb = iq_downconvert_and_lpf(chunk, p);
     dbg.rbb = rbb;
 
-    [metric, peak_idx, cfo_est_hz] = sync_metric_repeat_half(rbb, p.sync_half_len, p.fs);
+    [metric, peak_idx_raw] = sync_metric_known_preamble(rbb, p);
+    peak_idx = select_sync_peak(metric, p);
+    cfo_est_hz = estimate_cfo_from_repeat(rbb, peak_idx, p.sync_half_len, p.fs);
     dbg.sync_metric = metric;
     dbg.peak_idx = peak_idx;
+    dbg.peak_idx_raw = peak_idx_raw;
     dbg.cfo_est_hz = cfo_est_hz;
 
-    sync_start = peak_idx;
+    if isfield(p, 'oracle_sync_start') && ~isempty(p.oracle_sync_start)
+        sync_start = max(1, round(double(p.oracle_sync_start)));
+        dbg.peak_idx = sync_start;
+    else
+        sync_start = peak_idx;
+    end
+    if isfield(p, 'oracle_cfo_est_hz') && ~isempty(p.oracle_cfo_est_hz)
+        cfo_est_hz = double(p.oracle_cfo_est_hz);
+        dbg.cfo_est_hz = cfo_est_hz;
+    end
     if sync_start < 1
         return;
     end
@@ -141,61 +165,116 @@ end
 
 function [found, best_idx, best_score] = find_wake_tone(x, pos, p)
     found = false; best_idx = -1; best_score = 0;
-    N = round(p.wake_ms * 1e-3 * p.fs);
-    hop = max(1, floor(N / 4));
-    for i = pos:hop:(length(x)-N+1)
+    [ref, preN] = make_wake_tone_ref(p);
+    N = length(ref);
+    ref_energy = sum(abs(ref).^2) + 1e-12;
+    hop = max(1, floor(N / 8));
+    i_end = min(length(x)-N+1, pos + p.wake_search_len);
+    for i = pos:hop:i_end
         seg = x(i:i+N-1);
-        score = goertzel_power(seg, p.wake_freq, p.fs);
-        norm_score = score / (sum(seg.^2) + 1e-12);
+        corrv = sum(conj(ref) .* seg);
+        norm_score = abs(corrv)^2 / ((sum(abs(seg).^2) + 1e-12) * ref_energy);
         if norm_score > best_score
             best_score = norm_score;
             best_idx = i;
         end
-        if norm_score > p.detect_threshold
-            found = true;
-            best_idx = i;
-            best_score = norm_score;
-            return;
-        end
+    end
+    if best_score > p.detect_threshold
+        found = true;
+        best_idx = best_idx + preN;
     end
 end
 
-function P = goertzel_power(x, f0, fs)
-    N = length(x);
-    k = round(N * f0 / fs);
-    w = 2*pi*k/N;
-    c = 2*cos(w);
-    s1 = 0; s2 = 0;
-    for n = 1:N
-        s0 = x(n) + c*s1 - s2;
-        s2 = s1;
-        s1 = s0;
+function [ref, preN] = make_wake_tone_ref(p)
+    N = round(p.wake_ms * 1e-3 * p.fs);
+    preN = round(p.wake_ref_pre_ms * 1e-3 * p.fs);
+    postN = round(p.wake_guard_ms * 1e-3 * p.fs);
+    n = (0:N-1).';
+    w = sin(2*pi * p.wake_freq * n / p.fs);
+    ramp = min(round(0.001 * p.fs), floor(N/4));
+    env = ones(N,1);
+    if ramp > 1
+        r = (0:ramp-1).' / ramp;
+        env(1:ramp) = r;
+        env(end-ramp+1:end) = flipud(r);
     end
-    P = abs(s1^2 + s2^2 - c*s1*s2);
+    w = 0.7 * w .* env;
+    ref = [zeros(preN, 1); w; zeros(postN, 1)];
 end
 
-function [metric, peak_idx, cfo_est_hz] = sync_metric_repeat_half(r, L, fs)
+function [metric, peak_idx_raw] = sync_metric_known_preamble(r, p)
+    L = p.sync_half_len;
+    ref_half = known_sync_half(L);
+    ref = [ref_half; ref_half];
+    ref_energy = sum(abs(ref).^2) + 1e-12;
+
     N = length(r);
-    metric = zeros(max(1, N - 2*L), 1);
-    P = zeros(size(metric));
-    R = zeros(size(metric));
-    for d = 1:length(metric)
-        a = r(d:d+L-1);
-        b = r(d+L:d+2*L-1);
-        P(d) = sum(a .* conj(b));
-        R(d) = sum(abs(b).^2);
-        metric(d) = abs(P(d))^2 / (R(d)^2 + 1e-12);
+    M = max(1, N - 2*L + 1);
+    metric = zeros(M, 1);
+    for d = 1:M
+        seg = r(d:d+2*L-1);
+        c = sum(seg .* conj(ref));
+        e = sum(abs(seg).^2) + 1e-12;
+        metric(d) = abs(c)^2 / (e * ref_energy);
     end
-    [~, peak_idx] = max(metric);
-    phaseP = angle(P(peak_idx));
-    cfo_est_hz = -phaseP * fs / (2*pi*L);
+    [~, peak_idx_raw] = max(metric);
 end
 
-function rbb = iq_downconvert_and_lpf(y, fs, fc)
+function cfo_est_hz = estimate_cfo_from_repeat(r, sync_start, L, fs)
+    if sync_start < 1 || (sync_start + 2*L - 1) > length(r)
+        cfo_est_hz = 0;
+        return;
+    end
+    a = r(sync_start:sync_start+L-1);
+    b = r(sync_start+L:sync_start+2*L-1);
+    P = sum(a .* conj(b));
+    cfo_est_hz = -angle(P) * fs / (2*pi*L);
+end
+
+function peak_idx = select_sync_peak(metric, p)
+    if isempty(metric)
+        peak_idx = 1;
+        return;
+    end
+
+    max_m = max(metric);
+    thr_rel = p.sync_peak_rel_threshold * max_m;
+    thr_abs = p.sync_metric_abs_threshold;
+    thr = max(thr_rel, thr_abs);
+    cand = find(metric >= thr, 1, 'first');
+    if isempty(cand)
+        [~, peak_idx] = max(metric);
+    else
+        peak_idx = cand;
+    end
+end
+
+function s = known_sync_half(L)
+    idx = (0:L-1).';
+    a = exp(1j * pi/2 * mod(3*idx + 1, 4));
+    s = a / sqrt(mean(abs(a).^2));
+end
+
+function rbb = iq_downconvert_and_lpf(y, p)
+    fs = p.fs;
+    fc = p.fc;
     n = (0:length(y)-1).';
-    rmix = y .* exp(-1j * 2*pi * fc * n / fs);
+    if isfield(p, 'disable_modulation') && p.disable_modulation
+        rmix = y;
+    else
+        rmix = y .* exp(-1j * 2*pi * fc * n / fs);
+    end
+
+    if isfield(p, 'disable_lpf') && p.disable_lpf
+        rbb = rmix;
+        return;
+    end
+
     L = 65;
-    bw = 5000;
+    % Keep all configured OFDM bins plus margin after downconversion.
+    df = fs / p.Nfft;
+    max_sc_hz = max(p.used_bins) * df;
+    bw = min(0.45 * fs, max(5000, 1.35 * max_sc_hz));
     h = fir_lowpass(L, bw, fs);
     rbb = filter(h, 1, rmix);
     gd = floor((L-1)/2);
@@ -351,15 +430,24 @@ end
 function p = default_params()
     p.fs = 48000;
     p.fc = 17000;
-    p.Nfft = 32;
-    p.Ncp = 8;
-    p.used_bins = [3 4 5 6 7 8 9 10];
+    p.Nfft = 96;
+    p.Ncp = 24;
+    p.used_bins = [2 3 4 5];
     p.modulation = 'BPSK';
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;
     p.sync_half_len = 32;
     p.packet_payload_bytes = 24;
-    p.detect_threshold = 0.35;
+    p.detect_threshold = 0.12;
+    p.wake_search_len = 6000;
+    p.wake_ref_pre_ms = 15;
     p.sync_search_len = 500;
+    p.disable_lpf = false;
+    p.disable_modulation = false;
+    p.oracle_wake_start = [];
+    p.oracle_sync_start = [];
+    p.oracle_cfo_est_hz = [];
+    p.sync_peak_rel_threshold = 0.80;
+    p.sync_metric_abs_threshold = 0.02;
 end

@@ -304,6 +304,20 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     rx_syms = [];
     dbg.rx_syms_raw = [];
     dbg.rx_syms_eq = [];
+    pll_on = isfield(p, 'pll_enable') && p.pll_enable;
+    pll_kp = 0.05;
+    pll_ki = 0.002;
+    if isfield(p, 'pll_kp')
+        pll_kp = p.pll_kp;
+    end
+    if isfield(p, 'pll_ki')
+        pll_ki = p.pll_ki;
+    end
+    phase_hat = 0;
+    freq_hat = 0;
+    dbg.pll_phase_hist = [];
+    dbg.pll_freq_hist = [];
+    dbg.pll_err_hist = [];
     for i = 1:max_data_ofdm
         s0 = data_start + (i-1)*sym_len;
         s1 = s0 + sym_len - 1;
@@ -315,6 +329,19 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
         Y = fft(rt, p.Nfft);
         Xraw = Y(p.used_bins);
         Xeq = Xraw ./ Hest;
+        if pll_on
+            Xeq = Xeq .* exp(-1j * phase_hat);
+            Xdec = hard_slice_symbols(Xeq, p.modulation);
+            ph_err = angle(sum(Xeq .* conj(Xdec)));
+            if ~isfinite(ph_err)
+                ph_err = 0;
+            end
+            freq_hat = freq_hat + pll_ki * ph_err;
+            phase_hat = phase_hat + freq_hat + pll_kp * ph_err;
+            dbg.pll_phase_hist(end+1, 1) = phase_hat; %#ok<AGROW>
+            dbg.pll_freq_hist(end+1, 1) = freq_hat; %#ok<AGROW>
+            dbg.pll_err_hist(end+1, 1) = ph_err; %#ok<AGROW>
+        end
         rx_syms = [rx_syms; Xeq(:)]; %#ok<AGROW>
         dbg.rx_syms_raw = [dbg.rx_syms_raw; Xraw(:)]; %#ok<AGROW>
         dbg.rx_syms_eq = [dbg.rx_syms_eq; Xeq(:)]; %#ok<AGROW>
@@ -448,6 +475,22 @@ function bits = demap_bits(syms, modulation)
             bits = zeros(2*length(syms), 1, 'uint8');
             bits(1:2:end) = uint8(real(syms) < 0);
             bits(2:2:end) = uint8(imag(syms) < 0);
+        otherwise
+            error('Unsupported modulation');
+    end
+end
+
+function out = hard_slice_symbols(syms, modulation)
+    switch upper(modulation)
+        case 'BPSK'
+            out = ones(size(syms));
+            out(real(syms) < 0) = -1;
+        case 'QPSK'
+            re = ones(size(syms));
+            im = ones(size(syms));
+            re(real(syms) < 0) = -1;
+            im(imag(syms) < 0) = -1;
+            out = (re + 1j * im) / sqrt(2);
         otherwise
             error('Unsupported modulation');
     end

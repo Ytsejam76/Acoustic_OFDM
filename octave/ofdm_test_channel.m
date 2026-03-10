@@ -280,6 +280,9 @@ function p = default_params()
     p.sync_metric_abs_threshold = 0.02;
     p.cfo_grid_hz = -12:2:12;
     p.rx_preroll = 128;
+    p.pll_enable = true;
+    p.pll_kp = 0.05;
+    p.pll_ki = 0.002;
 
     p.snr_db = 24;
     p.cfo_hz = 4;

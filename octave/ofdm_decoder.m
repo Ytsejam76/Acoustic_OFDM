@@ -21,7 +21,8 @@ function [result, dbg] = ofdm_decoder(rx_audio, p)
             [found, start_idx, score] = find_wake_tone(rx_audio, pos, p);
         end
         if ~found
-            break;
+            pos = pos + p.wake_miss_hop;
+            continue;
         end
 
         segment = rx_audio(start_idx:end);
@@ -32,9 +33,9 @@ function [result, dbg] = ofdm_decoder(rx_audio, p)
 
         if ok
             packets{end+1} = pkt_info; %#ok<AGROW>
-            pos = start_idx + consumed;
+            pos = max(start_idx + consumed, start_idx + p.wake_rearm_hop);
         else
-            pos = start_idx + round(0.03 * p.fs);
+            pos = start_idx + p.wake_retry_hop;
         end
     end
 
@@ -62,110 +63,82 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
     max_data_ofdm = ceil(max_bits / (numel(p.used_bins) * bps)) + 4;
     needed_after_sync = 2*p.sync_half_len + sym_len + max_data_ofdm*sym_len;
     search_end = min(length(rx_segment), coarse_start + p.sync_search_len + needed_after_sync);
-    chunk = rx_segment(coarse_start:search_end);
-    rbb = iq_downconvert_and_lpf(chunk, p);
+    pre = min(coarse_start - 1, p.rx_preroll);
+    chunk = rx_segment(coarse_start-pre:search_end);
+    rbb_full = iq_downconvert_and_lpf(chunk, p);
+    rbb = rbb_full(pre+1:end);
     dbg.rbb = rbb;
 
     [metric, peak_idx_raw] = sync_metric_known_preamble(rbb, p);
-    peak_idx = select_sync_peak(metric, p);
+    sync_cands = select_sync_candidates(metric, p);
+    peak_idx = sync_cands(1);
     cfo_est_hz = estimate_cfo_from_repeat(rbb, peak_idx, p.sync_half_len, p.fs);
     dbg.sync_metric = metric;
     dbg.peak_idx = peak_idx;
     dbg.peak_idx_raw = peak_idx_raw;
     dbg.cfo_est_hz = cfo_est_hz;
+    dbg.sync_candidates = sync_cands(:);
 
     if isfield(p, 'oracle_sync_start') && ~isempty(p.oracle_sync_start)
-        sync_start = max(1, round(double(p.oracle_sync_start)));
-        dbg.peak_idx = sync_start;
-    else
-        sync_start = peak_idx;
-    end
-    if isfield(p, 'oracle_cfo_est_hz') && ~isempty(p.oracle_cfo_est_hz)
-        cfo_est_hz = double(p.oracle_cfo_est_hz);
-        dbg.cfo_est_hz = cfo_est_hz;
-    end
-    if sync_start < 1
-        return;
-    end
-
-    n = (0:length(rbb)-1).';
-    rbb = rbb .* exp(-1j * 2*pi * cfo_est_hz * n / p.fs);
-    dbg.rbb_cfo = rbb;
-
-    xsync_len = 2 * p.sync_half_len;
-    train_len = p.Nfft + p.Ncp;
-    train_start = sync_start + xsync_len;
-    train_end = train_start + train_len - 1;
-    if train_end > length(rbb)
-        return;
-    end
-
-    rtrain = rbb(train_start:train_end);
-    rtrain = rtrain(p.Ncp+1:end);
-    Ytrain = fft(rtrain, p.Nfft);
-    train_known = known_training_symbols(numel(p.used_bins), p.modulation);
-    Hest = Ytrain(p.used_bins) ./ train_known;
-
-    dbg.Hest = Hest;
-    dbg.train_rx_raw = Ytrain(p.used_bins);
-    dbg.train_rx_eq = Ytrain(p.used_bins) ./ Hest;
-
-    data_start = train_end + 1;
-    max_payload_bytes = p.packet_payload_bytes + 16;
-    max_bits = max_payload_bytes * 8;
-    bps = bits_per_modulation(p.modulation);
-    max_data_ofdm = ceil(max_bits / (numel(p.used_bins) * bps)) + 2;
-
-    sym_len = p.Nfft + p.Ncp;
-    total_needed = data_start + max_data_ofdm * sym_len - 1;
-    if total_needed > length(rbb)
-        max_data_ofdm = floor((length(rbb) - data_start + 1) / sym_len);
-    end
-    if max_data_ofdm <= 0
-        return;
-    end
-
-    rx_syms = [];
-    dbg.rx_syms_raw = [];
-    dbg.rx_syms_eq = [];
-
-    for i = 1:max_data_ofdm
-        s0 = data_start + (i-1)*sym_len;
-        s1 = s0 + sym_len - 1;
-        if s1 > length(rbb)
-            break;
+        sync_cands = max(1, round(double(p.oracle_sync_start)));
+        dbg.peak_idx = sync_cands(1);
+        use_forced_cfo = isfield(p, 'oracle_cfo_est_hz') && ~isempty(p.oracle_cfo_est_hz);
+        if use_forced_cfo
+            cfo_force = double(p.oracle_cfo_est_hz);
+        else
+            cfo_force = [];
         end
-        rt = rbb(s0:s1);
-        rt = rt(p.Ncp+1:end);
-        Y = fft(rt, p.Nfft);
-        Xraw = Y(p.used_bins);
-        Xeq = Xraw ./ Hest;
-        rx_syms = [rx_syms; Xeq(:)]; %#ok<AGROW>
-        dbg.rx_syms_raw = [dbg.rx_syms_raw; Xraw(:)]; %#ok<AGROW>
-        dbg.rx_syms_eq = [dbg.rx_syms_eq; Xeq(:)]; %#ok<AGROW>
+    else
+        cfo_force = [];
     end
 
-    rx_bits = demap_bits(rx_syms, p.modulation);
-    rx_bytes = bits_to_bytes(rx_bits);
-    [valid, pkt_info, pkt_total_bytes] = parse_packet_bytes(rx_bytes);
-    if ~valid
-        return;
+    max_cfo_hz = 300;
+    if isfield(p, 'max_cfo_hz')
+        max_cfo_hz = p.max_cfo_hz;
     end
 
-    num_data_bits = pkt_total_bytes * 8;
-    used_ofdm = ceil(num_data_bits / (numel(p.used_bins) * bits_per_modulation(p.modulation)));
-    num_used_syms = used_ofdm * numel(p.used_bins);
-    dbg.rx_syms_raw = dbg.rx_syms_raw(1:min(num_used_syms, numel(dbg.rx_syms_raw)));
-    dbg.rx_syms_eq = dbg.rx_syms_eq(1:min(num_used_syms, numel(dbg.rx_syms_eq)));
+    for ci = 1:numel(sync_cands)
+        sync_start = sync_cands(ci);
+        if sync_start < 1
+            continue;
+        end
 
-    consumed_bb = (sync_start - 1) + xsync_len + train_len + used_ofdm * sym_len;
-    consumed = coarse_start - 1 + consumed_bb;
-    ok = true;
+        if isempty(cfo_force)
+            cfo_est = estimate_cfo_from_repeat(rbb, sync_start, p.sync_half_len, p.fs);
+            cfo_list = p.cfo_grid_hz(:).';
+            if abs(cfo_est) <= max_cfo_hz
+                cfo_list = [cfo_est, cfo_list];
+            end
+            cfo_list = unique(cfo_list, 'stable');
+        else
+            cfo_list = cfo_force;
+        end
+
+        for cfi = 1:numel(cfo_list)
+            cfo_try = cfo_list(cfi);
+            [ok_try, pkt_try, consumed_bb, dbg_try] = try_decode_from_sync(rbb, sync_start, cfo_try, p);
+            if ok_try
+                ok = true;
+                pkt_info = pkt_try;
+                consumed = coarse_start - 1 + consumed_bb;
+                dbg.cfo_est_hz = cfo_try;
+                dbg.sync_candidate_used = ci;
+                dbg.peak_idx = sync_start;
+                dbg.rbb_cfo = dbg_try.rbb_cfo;
+                dbg.Hest = dbg_try.Hest;
+                dbg.train_rx_raw = dbg_try.train_rx_raw;
+                dbg.train_rx_eq = dbg_try.train_rx_eq;
+                dbg.rx_syms_raw = dbg_try.rx_syms_raw;
+                dbg.rx_syms_eq = dbg_try.rx_syms_eq;
+                return;
+            end
+        end
+    end
 end
 
 function [found, best_idx, best_score] = find_wake_tone(x, pos, p)
     found = false; best_idx = -1; best_score = 0;
-    [ref, preN] = make_wake_tone_ref(p);
+    [ref, ~] = make_wake_tone_ref(p);
     N = length(ref);
     ref_energy = sum(abs(ref).^2) + 1e-12;
     hop = max(1, floor(N / 8));
@@ -179,9 +152,12 @@ function [found, best_idx, best_score] = find_wake_tone(x, pos, p)
             best_idx = i;
         end
     end
-    if best_score > p.detect_threshold
+    min_score = 0.005;
+    if isfield(p, 'wake_min_score')
+        min_score = p.wake_min_score;
+    end
+    if best_score > max(min_score, p.detect_threshold)
         found = true;
-        best_idx = best_idx + preN;
     end
 end
 
@@ -190,7 +166,15 @@ function [ref, preN] = make_wake_tone_ref(p)
     preN = round(p.wake_ref_pre_ms * 1e-3 * p.fs);
     postN = round(p.wake_guard_ms * 1e-3 * p.fs);
     n = (0:N-1).';
-    w = sin(2*pi * p.wake_freq * n / p.fs);
+    if isfield(p, 'use_chirp_sync') && p.use_chirp_sync
+        t = n / p.fs;
+        T = max(t(end), 1/p.fs);
+        k = (p.sync_chirp_f1 - p.sync_chirp_f0) / T;
+        phase = 2*pi * (p.sync_chirp_f0 * t + 0.5 * k * t.^2);
+        w = sin(phase);
+    else
+        w = sin(2*pi * p.wake_freq * n / p.fs);
+    end
     ramp = min(round(0.001 * p.fs), floor(N/4));
     env = ones(N,1);
     if ramp > 1
@@ -231,22 +215,125 @@ function cfo_est_hz = estimate_cfo_from_repeat(r, sync_start, L, fs)
     cfo_est_hz = -angle(P) * fs / (2*pi*L);
 end
 
-function peak_idx = select_sync_peak(metric, p)
+function cands = select_sync_candidates(metric, p)
     if isempty(metric)
-        peak_idx = 1;
+        cands = 1;
         return;
     end
 
-    max_m = max(metric);
+    max_search = numel(metric);
+    if isfield(p, 'sync_search_len')
+        max_search = min(max_search, p.sync_search_len);
+    end
+    mm = metric(1:max_search);
+    max_m = max(mm);
     thr_rel = p.sync_peak_rel_threshold * max_m;
     thr_abs = p.sync_metric_abs_threshold;
     thr = max(thr_rel, thr_abs);
-    cand = find(metric >= thr, 1, 'first');
-    if isempty(cand)
-        [~, peak_idx] = max(metric);
-    else
-        peak_idx = cand;
+
+    num_cands = 6;
+    if isfield(p, 'sync_num_candidates')
+        num_cands = p.sync_num_candidates;
     end
+    min_sep = max(1, round(p.sync_half_len / 4));
+    if isfield(p, 'sync_candidate_min_sep')
+        min_sep = max(1, round(p.sync_candidate_min_sep));
+    end
+
+    [vals, idx] = sort(mm, 'descend');
+    cands = [];
+    for i = 1:numel(idx)
+        if vals(i) < thr
+            break;
+        end
+        if isempty(cands) || min(abs(idx(i) - cands)) >= min_sep
+            cands(end+1) = idx(i); %#ok<AGROW>
+            if numel(cands) >= num_cands
+                break;
+            end
+        end
+    end
+    if isempty(cands)
+        [~, best] = max(mm);
+        cands = best;
+    end
+end
+
+function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start, cfo_est_hz, p)
+    ok = false;
+    pkt_info = struct();
+    consumed_bb = 0;
+    dbg = struct();
+
+    n = (0:length(rbb)-1).';
+    rbb_cfo = rbb .* exp(-1j * 2*pi * cfo_est_hz * n / p.fs);
+    dbg.rbb_cfo = rbb_cfo;
+
+    xsync_len = 2 * p.sync_half_len;
+    train_len = p.Nfft + p.Ncp;
+    train_start = sync_start + xsync_len;
+    train_end = train_start + train_len - 1;
+    if train_end > length(rbb_cfo)
+        return;
+    end
+
+    rtrain = rbb_cfo(train_start:train_end);
+    rtrain = rtrain(p.Ncp+1:end);
+    Ytrain = fft(rtrain, p.Nfft);
+    train_known = known_training_symbols(numel(p.used_bins), p.modulation);
+    Hest = Ytrain(p.used_bins) ./ train_known;
+    dbg.Hest = Hest;
+    dbg.train_rx_raw = Ytrain(p.used_bins);
+    dbg.train_rx_eq = Ytrain(p.used_bins) ./ Hest;
+
+    data_start = train_end + 1;
+    max_payload_bytes = p.packet_payload_bytes + 16;
+    max_bits = max_payload_bytes * 8;
+    bps = bits_per_modulation(p.modulation);
+    max_data_ofdm = ceil(max_bits / (numel(p.used_bins) * bps)) + 2;
+
+    sym_len = p.Nfft + p.Ncp;
+    total_needed = data_start + max_data_ofdm * sym_len - 1;
+    if total_needed > length(rbb_cfo)
+        max_data_ofdm = floor((length(rbb_cfo) - data_start + 1) / sym_len);
+    end
+    if max_data_ofdm <= 0
+        return;
+    end
+
+    rx_syms = [];
+    dbg.rx_syms_raw = [];
+    dbg.rx_syms_eq = [];
+    for i = 1:max_data_ofdm
+        s0 = data_start + (i-1)*sym_len;
+        s1 = s0 + sym_len - 1;
+        if s1 > length(rbb_cfo)
+            break;
+        end
+        rt = rbb_cfo(s0:s1);
+        rt = rt(p.Ncp+1:end);
+        Y = fft(rt, p.Nfft);
+        Xraw = Y(p.used_bins);
+        Xeq = Xraw ./ Hest;
+        rx_syms = [rx_syms; Xeq(:)]; %#ok<AGROW>
+        dbg.rx_syms_raw = [dbg.rx_syms_raw; Xraw(:)]; %#ok<AGROW>
+        dbg.rx_syms_eq = [dbg.rx_syms_eq; Xeq(:)]; %#ok<AGROW>
+    end
+
+    rx_bits = demap_bits(rx_syms, p.modulation);
+    rx_bytes = bits_to_bytes(rx_bits);
+    [valid, pkt_info, pkt_total_bytes] = parse_packet_bytes(rx_bytes);
+    if ~valid
+        return;
+    end
+
+    num_data_bits = pkt_total_bytes * 8;
+    used_ofdm = ceil(num_data_bits / (numel(p.used_bins) * bits_per_modulation(p.modulation)));
+    num_used_syms = used_ofdm * numel(p.used_bins);
+    dbg.rx_syms_raw = dbg.rx_syms_raw(1:min(num_used_syms, numel(dbg.rx_syms_raw)));
+    dbg.rx_syms_eq = dbg.rx_syms_eq(1:min(num_used_syms, numel(dbg.rx_syms_eq)));
+    consumed_bb = (sync_start - 1) + xsync_len + train_len + used_ofdm * sym_len;
+    ok = true;
 end
 
 function s = known_sync_half(L)
@@ -437,12 +524,19 @@ function p = default_params()
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;
+    p.use_chirp_sync = true;
+    p.sync_chirp_f0 = 4000;
+    p.sync_chirp_f1 = 8000;
     p.sync_half_len = 64;
     p.packet_payload_bytes = 24;
-    p.detect_threshold = 0.12;
-    p.wake_search_len = 6000;
+    p.detect_threshold = 0.005;
+    p.wake_min_score = 0.005;
+    p.wake_search_len = 8000;
+    p.wake_miss_hop = round(0.012 * p.fs);
+    p.wake_retry_hop = round(0.018 * p.fs);
+    p.wake_rearm_hop = round(0.008 * p.fs);
     p.wake_ref_pre_ms = 15;
-    p.sync_search_len = 500;
+    p.sync_search_len = 1500;
     p.disable_lpf = false;
     p.disable_modulation = false;
     p.oracle_wake_start = [];
@@ -450,4 +544,9 @@ function p = default_params()
     p.oracle_cfo_est_hz = [];
     p.sync_peak_rel_threshold = 0.80;
     p.sync_metric_abs_threshold = 0.02;
+    p.sync_num_candidates = 20;
+    p.sync_candidate_min_sep = 16;
+    p.max_cfo_hz = 300;
+    p.cfo_grid_hz = -12:2:12;
+    p.rx_preroll = 128;
 end

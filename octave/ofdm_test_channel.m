@@ -113,7 +113,8 @@ function y = simulate_audio_channel(x, p)
     if p.disable_modulation
         y = y .* exp(1j * 2*pi * p.cfo_hz * n / p.fs);
     else
-        y = real(y .* exp(1j * 2*pi * p.cfo_hz * n / p.fs));
+        ya = analytic_signal(y);
+        y = real(ya .* exp(1j * 2*pi * p.cfo_hz * n / p.fs));
     end
 
     % Optional amplitude ripple.
@@ -134,6 +135,22 @@ function y = simulate_audio_channel(x, p)
     if m > 0
         y = 0.85 * y / m;
     end
+end
+
+function xa = analytic_signal(x)
+    x = x(:);
+    N = length(x);
+    X = fft(x);
+    H = zeros(N,1);
+    if mod(N,2) == 0
+        H(1) = 1;
+        H(N/2+1) = 1;
+        H(2:N/2) = 2;
+    else
+        H(1) = 1;
+        H(2:(N+1)/2) = 2;
+    end
+    xa = ifft(X .* H);
 end
 
 function fig_handles = make_plots(tx_audio, rx_audio, dbg, p)
@@ -244,16 +261,25 @@ function p = default_params()
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;
+    p.use_chirp_sync = true;
+    p.sync_chirp_f0 = 4000;
+    p.sync_chirp_f1 = 8000;
     p.sync_half_len = 64;
     p.packet_payload_bytes = 24;
     p.payload_bytes = 64;
     p.session_id = uint16(1234);
-    p.detect_threshold = 0.12;
-    p.wake_search_len = 6000;
-    p.wake_ref_pre_ms = 8;
-    p.sync_search_len = 500;
+    p.detect_threshold = 0.005;
+    p.wake_min_score = 0.005;
+    p.wake_search_len = 8000;
+    p.wake_miss_hop = round(0.012 * p.fs);
+    p.wake_retry_hop = round(0.018 * p.fs);
+    p.wake_rearm_hop = round(0.008 * p.fs);
+    p.wake_ref_pre_ms = 15;
+    p.sync_search_len = 1500;
     p.sync_peak_rel_threshold = 0.80;
     p.sync_metric_abs_threshold = 0.02;
+    p.cfo_grid_hz = -12:2:12;
+    p.rx_preroll = 128;
 
     p.snr_db = 24;
     p.cfo_hz = 4;

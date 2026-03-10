@@ -114,6 +114,9 @@ function p = default_params()
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;
+    p.use_chirp_sync = true;
+    p.sync_chirp_f0 = 4000;
+    p.sync_chirp_f1 = 8000;
     p.sync_half_len = 64;
     p.packet_payload_bytes = 24;
     p.session_id = uint16(1234);
@@ -201,7 +204,15 @@ end
 function w = make_wake_tone(p)
     N = round(p.wake_ms * 1e-3 * p.fs);
     n = (0:N-1).';
-    w = sin(2*pi * p.wake_freq * n / p.fs);
+    if isfield(p, 'use_chirp_sync') && p.use_chirp_sync
+        t = n / p.fs;
+        T = max(t(end), 1/p.fs);
+        k = (p.sync_chirp_f1 - p.sync_chirp_f0) / T;
+        phase = 2*pi * (p.sync_chirp_f0 * t + 0.5 * k * t.^2);
+        w = sin(phase);
+    else
+        w = sin(2*pi * p.wake_freq * n / p.fs);
+    end
     ramp = min(round(0.001 * p.fs), floor(N/4));
     env = ones(N,1);
     if ramp > 1

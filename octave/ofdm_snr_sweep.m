@@ -51,7 +51,7 @@ function stats = ofdm_snr_sweep(varargin)
         fig_path = fullfile(cfg.out_dir, cfg.plot_filename);
         saveas(gcf, fig_path);
         mat_path = fullfile(cfg.out_dir, 'snr_sweep_stats.mat');
-        save(mat_path, 'stats');
+        save('-v7', mat_path, 'stats');
         fprintf('Saved sweep plot to: %s\n', fig_path);
         fprintf('Saved sweep stats to: %s\n', mat_path);
     end
@@ -238,7 +238,7 @@ function cfg = default_cfg()
     cfg.show_progress = true;
     cfg.base_params = default_base_params();
     cfg.save_plot = true;
-    cfg.out_dir = fullfile(pwd, 'output_plots');
+    cfg.out_dir = fullfile(pwd, '..', 'images');
     cfg.plot_filename = 'snr_sweep.png';
 end
 
@@ -271,7 +271,7 @@ function p = default_base_params()
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;
     p.wake_miss_hop = round(0.012 * p.fs);
-    p.wake_retry_hop = round(0.018 * p.fs);
+    p.wake_retry_hop = round(0.002 * p.fs);
     p.wake_rearm_hop = round(0.008 * p.fs);
     p.use_chirp_sync = true;
     p.sync_chirp_f0 = 4000;
@@ -301,6 +301,6 @@ function p = default_base_params()
     p.make_plots = false;
     p.save_images = false;
     p.save_decoder_constellation = false;
-    p.out_dir = fullfile(pwd, 'output_plots');
+    p.out_dir = fullfile(pwd, '..', 'images');
     p.verbose = false;
 end

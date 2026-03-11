@@ -70,7 +70,10 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
     dbg.rbb = rbb;
 
     [metric, peak_idx_raw] = sync_metric_known_preamble(rbb, p);
-    sync_cands = select_sync_candidates(metric, p);
+    [sync_cands, sync_scores, peak_ratio] = select_sync_candidates(metric, p);
+    if isempty(sync_cands)
+        return;
+    end
     peak_idx = sync_cands(1);
     cfo_est_hz = estimate_cfo_from_repeat(rbb, peak_idx, p.sync_half_len, p.fs);
     dbg.sync_metric = metric;
@@ -78,6 +81,8 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
     dbg.peak_idx_raw = peak_idx_raw;
     dbg.cfo_est_hz = cfo_est_hz;
     dbg.sync_candidates = sync_cands(:);
+    dbg.sync_candidate_scores = sync_scores(:);
+    dbg.sync_peak_ratio = peak_ratio;
 
     if isfield(p, 'oracle_sync_start') && ~isempty(p.oracle_sync_start)
         sync_cands = max(1, round(double(p.oracle_sync_start)));
@@ -96,6 +101,15 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
     if isfield(p, 'max_cfo_hz')
         max_cfo_hz = p.max_cfo_hz;
     end
+
+    best_found = false;
+    best_score = -Inf;
+    best_pkt = struct();
+    best_consumed_bb = 0;
+    best_dbg_try = struct();
+    best_sync = 0;
+    best_ci = 0;
+    best_cfo = 0;
 
     for ci = 1:numel(sync_cands)
         sync_start = sync_cands(ci);
@@ -118,21 +132,37 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
             cfo_try = cfo_list(cfi);
             [ok_try, pkt_try, consumed_bb, dbg_try] = try_decode_from_sync(rbb, sync_start, cfo_try, p);
             if ok_try
-                ok = true;
-                pkt_info = pkt_try;
-                consumed = coarse_start - 1 + consumed_bb;
-                dbg.cfo_est_hz = cfo_try;
-                dbg.sync_candidate_used = ci;
-                dbg.peak_idx = sync_start;
-                dbg.rbb_cfo = dbg_try.rbb_cfo;
-                dbg.Hest = dbg_try.Hest;
-                dbg.train_rx_raw = dbg_try.train_rx_raw;
-                dbg.train_rx_eq = dbg_try.train_rx_eq;
-                dbg.rx_syms_raw = dbg_try.rx_syms_raw;
-                dbg.rx_syms_eq = dbg_try.rx_syms_eq;
-                return;
+                score = sync_scores(min(ci, numel(sync_scores))) / (1 + abs(cfo_try) / max(max_cfo_hz, 1));
+                if score > best_score
+                    best_found = true;
+                    best_score = score;
+                    best_pkt = pkt_try;
+                    best_consumed_bb = consumed_bb;
+                    best_dbg_try = dbg_try;
+                    best_sync = sync_start;
+                    best_ci = ci;
+                    best_cfo = cfo_try;
+                end
             end
         end
+    end
+
+    if best_found
+        ok = true;
+        pkt_info = best_pkt;
+        consumed = coarse_start - 1 + best_consumed_bb;
+        dbg.cfo_est_hz = best_cfo;
+        dbg.sync_candidate_used = best_ci;
+        dbg.peak_idx = best_sync;
+        dbg.rbb_cfo = best_dbg_try.rbb_cfo;
+        dbg.Hest = best_dbg_try.Hest;
+        dbg.train_rx_raw = best_dbg_try.train_rx_raw;
+        dbg.train_rx_eq = best_dbg_try.train_rx_eq;
+        dbg.rx_syms_raw = best_dbg_try.rx_syms_raw;
+        dbg.rx_syms_eq = best_dbg_try.rx_syms_eq;
+        dbg.pll_phase_hist = best_dbg_try.pll_phase_hist;
+        dbg.pll_freq_hist = best_dbg_try.pll_freq_hist;
+        dbg.pll_err_hist = best_dbg_try.pll_err_hist;
     end
 end
 
@@ -143,6 +173,13 @@ function [found, best_idx, best_score] = find_wake_tone(x, pos, p)
     ref_energy = sum(abs(ref).^2) + 1e-12;
     hop = max(1, floor(N / 8));
     i_end = min(length(x)-N+1, pos + p.wake_search_len);
+    min_score = 0.005;
+    if isfield(p, 'wake_min_score')
+        min_score = p.wake_min_score;
+    end
+    thr = max(min_score, p.detect_threshold);
+
+    first_hit = -1;
     for i = pos:hop:i_end
         seg = x(i:i+N-1);
         corrv = sum(conj(ref) .* seg);
@@ -151,13 +188,28 @@ function [found, best_idx, best_score] = find_wake_tone(x, pos, p)
             best_score = norm_score;
             best_idx = i;
         end
+        if first_hit < 0 && norm_score >= thr
+            first_hit = i;
+            break;
+        end
     end
-    min_score = 0.005;
-    if isfield(p, 'wake_min_score')
-        min_score = p.wake_min_score;
-    end
-    if best_score > max(min_score, p.detect_threshold)
-        found = true;
+
+    if first_hit > 0
+        % Refine around the first crossing to avoid jumping to later false wakes.
+        j0 = max(pos, first_hit - 2*hop);
+        j1 = min(i_end, first_hit + 2*hop);
+        best_score = -Inf;
+        best_idx = first_hit;
+        for j = j0:j1
+            seg = x(j:j+N-1);
+            corrv = sum(conj(ref) .* seg);
+            norm_score = abs(corrv)^2 / ((sum(abs(seg).^2) + 1e-12) * ref_energy);
+            if norm_score > best_score
+                best_score = norm_score;
+                best_idx = j;
+            end
+        end
+        found = (best_score >= thr);
     end
 end
 
@@ -215,9 +267,11 @@ function cfo_est_hz = estimate_cfo_from_repeat(r, sync_start, L, fs)
     cfo_est_hz = -angle(P) * fs / (2*pi*L);
 end
 
-function cands = select_sync_candidates(metric, p)
+function [cands, scores, peak_ratio] = select_sync_candidates(metric, p)
     if isempty(metric)
         cands = 1;
+        scores = 1;
+        peak_ratio = Inf;
         return;
     end
 
@@ -241,13 +295,50 @@ function cands = select_sync_candidates(metric, p)
     end
 
     [vals, idx] = sort(mm, 'descend');
+    if numel(vals) >= 2
+        peak_ratio = vals(1) / (vals(2) + 1e-12);
+    else
+        peak_ratio = Inf;
+    end
+
+    expected_idx = 1;
+    if isfield(p, 'sync_expected_idx')
+        expected_idx = p.sync_expected_idx;
+    end
+    expected_span = 220;
+    if isfield(p, 'sync_expected_span')
+        expected_span = max(1, p.sync_expected_span);
+    end
+    expected_weight = 1.0;
+    if isfield(p, 'sync_expected_weight')
+        expected_weight = max(0, p.sync_expected_weight);
+    end
+    dist = abs(idx - expected_idx);
+    rank_val = vals .* exp(-expected_weight * (dist / expected_span));
+
+    [~, order] = sort(rank_val, 'descend');
     cands = [];
-    for i = 1:numel(idx)
+    scores = [];
+
+    % Always keep one strong early candidate near the expected sync position.
+    exp_lo = max(1, round(expected_idx - expected_span));
+    exp_hi = min(numel(mm), round(expected_idx + expected_span));
+    mm_exp = mm(exp_lo:exp_hi);
+    [exp_best_val, exp_off] = max(mm_exp);
+    exp_best_idx = exp_lo + exp_off - 1;
+    if exp_best_val >= thr
+        cands(end+1) = exp_best_idx; %#ok<AGROW>
+        scores(end+1) = exp_best_val; %#ok<AGROW>
+    end
+
+    for oi = 1:numel(order)
+        i = order(oi);
         if vals(i) < thr
             break;
         end
         if isempty(cands) || min(abs(idx(i) - cands)) >= min_sep
             cands(end+1) = idx(i); %#ok<AGROW>
+            scores(end+1) = rank_val(i); %#ok<AGROW>
             if numel(cands) >= num_cands
                 break;
             end
@@ -256,6 +347,7 @@ function cands = select_sync_candidates(metric, p)
     if isempty(cands)
         [~, best] = max(mm);
         cands = best;
+        scores = mm(best);
     end
 end
 
@@ -576,7 +668,7 @@ function p = default_params()
     p.wake_min_score = 0.005;
     p.wake_search_len = 8000;
     p.wake_miss_hop = round(0.012 * p.fs);
-    p.wake_retry_hop = round(0.018 * p.fs);
+    p.wake_retry_hop = round(0.002 * p.fs);
     p.wake_rearm_hop = round(0.008 * p.fs);
     p.wake_ref_pre_ms = 15;
     p.sync_search_len = 1500;
@@ -591,5 +683,12 @@ function p = default_params()
     p.sync_candidate_min_sep = 16;
     p.max_cfo_hz = 300;
     p.cfo_grid_hz = -12:2:12;
+    p.sync_peak_ratio_min = 1.20;
+    p.sync_expected_idx = 1;
+    p.sync_expected_span = 220;
+    p.sync_expected_weight = 1.0;
     p.rx_preroll = 128;
+    p.pll_enable = true;
+    p.pll_kp = 0.05;
+    p.pll_ki = 0.002;
 end

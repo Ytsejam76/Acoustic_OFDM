@@ -272,7 +272,7 @@ function p = default_params()
     p.wake_min_score = 0.005;
     p.wake_search_len = 8000;
     p.wake_miss_hop = round(0.012 * p.fs);
-    p.wake_retry_hop = round(0.018 * p.fs);
+    p.wake_retry_hop = round(0.002 * p.fs);
     p.wake_rearm_hop = round(0.008 * p.fs);
     p.wake_ref_pre_ms = 15;
     p.sync_search_len = 1500;
@@ -296,7 +296,7 @@ function p = default_params()
     p.pause_seconds = -1;
     p.save_images = true;
     p.save_decoder_constellation = true;
-    p.out_dir = fullfile(pwd, 'output_plots');
+    p.out_dir = fullfile(pwd, '..', 'images');
     p.disable_modulation = false;
     p.verbose = true;
 end

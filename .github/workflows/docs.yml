@@ -1,0 +1,51 @@
+name: Docs
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  push:
+    branches: ["mainline"]
+
+jobs:
+  cargo-doc:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build docs
+        run: cargo doc --workspace --no-deps
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Pages Metadata
+        run: |
+          CRATE_NAME=$(grep -m 1 '^name' Cargo.toml | cut -d '"' -f 2 | tr '-' '_')
+          echo "<meta http-equiv=\"refresh\" content=\"0; url=$CRATE_NAME/index.html\">" > target/doc/index.html
+          touch target/doc/.nojekyll
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: rust-docs-pages
+          path: target/doc
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: rust-docs-pages
+
+# vim: set ts=2 sw=2 et:

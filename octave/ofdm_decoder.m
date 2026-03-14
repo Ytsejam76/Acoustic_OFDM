@@ -59,10 +59,15 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
     end
 
     sym_len = p.Nfft + p.Ncp;
+    [data_bins, ~, ~] = ofdm_bin_plan(p);
+    num_data_carriers = numel(data_bins);
+    if num_data_carriers <= 0
+        return;
+    end
     bps = bits_per_modulation(p.modulation);
     max_payload_bytes = p.packet_payload_bytes + 16;
     max_bits = max_payload_bytes * 8;
-    max_data_ofdm = ceil(max_bits / (numel(p.used_bins) * bps)) + 4;
+    max_data_ofdm = ceil(max_bits / (num_data_carriers * bps)) + 4;
     needed_after_sync = 2*p.sync_half_len + sym_len + max_data_ofdm*sym_len;
     search_end = min(length(rx_segment), coarse_start + p.sync_search_len + needed_after_sync);
     pre = min(coarse_start - 1, p.rx_preroll);
@@ -374,17 +379,23 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     rtrain = rbb_cfo(train_start:train_end);
     rtrain = rtrain(p.Ncp+1:end);
     Ytrain = fft(rtrain, p.Nfft);
-    train_known = known_training_symbols(numel(p.used_bins), p.modulation);
-    Hest = Ytrain(p.used_bins) ./ train_known;
+    [data_bins, pilot_bins, used_bins] = ofdm_bin_plan(p);
+    num_data_carriers = numel(data_bins);
+    if num_data_carriers <= 0
+        return;
+    end
+    [has_pilot, pilot_pos, data_pos] = bin_positions(used_bins, pilot_bins, data_bins);
+    train_known = known_training_symbols(numel(used_bins), p.modulation);
+    Hest = Ytrain(used_bins) ./ train_known;
     dbg.Hest = Hest;
-    dbg.train_rx_raw = Ytrain(p.used_bins);
-    dbg.train_rx_eq = Ytrain(p.used_bins) ./ Hest;
+    dbg.train_rx_raw = Ytrain(used_bins);
+    dbg.train_rx_eq = Ytrain(used_bins) ./ Hest;
 
     data_start = train_end + 1;
     max_payload_bytes = p.packet_payload_bytes + 16;
     max_bits = max_payload_bytes * 8;
     bps = bits_per_modulation(p.modulation);
-    max_data_ofdm = ceil(max_bits / (numel(p.used_bins) * bps)) + 2;
+    max_data_ofdm = ceil(max_bits / (num_data_carriers * bps)) + 2;
 
     sym_len = p.Nfft + p.Ncp;
     total_needed = data_start + max_data_ofdm * sym_len - 1;
@@ -412,6 +423,7 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.pll_phase_hist = [];
     dbg.pll_freq_hist = [];
     dbg.pll_err_hist = [];
+    dbg.pilot_gain_hist = [];
     for i = 1:max_data_ofdm
         s0 = data_start + (i-1)*sym_len;
         s1 = s0 + sym_len - 1;
@@ -421,8 +433,21 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
         rt = rbb_cfo(s0:s1);
         rt = rt(p.Ncp+1:end);
         Y = fft(rt, p.Nfft);
-        Xraw = Y(p.used_bins);
-        Xeq = Xraw ./ Hest;
+        Xraw_used = Y(used_bins);
+        Xeq_used = Xraw_used ./ Hest;
+        if has_pilot
+            pref = known_pilot_symbols(numel(pilot_bins), i);
+            prx = Xeq_used(pilot_pos);
+            g = sum(prx .* conj(pref)) / (sum(abs(pref).^2) + 1e-12);
+            if isfinite(g) && abs(g) > 1e-12
+                Xeq_used = Xeq_used / g;
+            else
+                g = 1;
+            end
+            dbg.pilot_gain_hist(end+1, 1) = g; %#ok<AGROW>
+        end
+        Xraw = Xraw_used(data_pos);
+        Xeq = Xeq_used(data_pos);
         if pll_on
             Xeq = Xeq .* exp(-1j * phase_hat);
             Xdec = hard_slice_symbols(Xeq, p.modulation);
@@ -449,8 +474,8 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     end
 
     num_data_bits = pkt_total_bytes * 8;
-    used_ofdm = ceil(num_data_bits / (numel(p.used_bins) * bits_per_modulation(p.modulation)));
-    num_used_syms = used_ofdm * numel(p.used_bins);
+    used_ofdm = ceil(num_data_bits / (num_data_carriers * bits_per_modulation(p.modulation)));
+    num_used_syms = used_ofdm * num_data_carriers;
     dbg.rx_syms_raw = dbg.rx_syms_raw(1:min(num_used_syms, numel(dbg.rx_syms_raw)));
     dbg.rx_syms_eq = dbg.rx_syms_eq(1:min(num_used_syms, numel(dbg.rx_syms_eq)));
     consumed_bb = (sync_start - 1) + xsync_len + train_len + used_ofdm * sym_len;
@@ -616,6 +641,72 @@ function s = known_training_symbols(N, modulation)
     end
 end
 
+function p = known_pilot_symbols(N, sym_idx)
+    idx = (0:N-1).';
+    p = exp(1j * pi/2 * mod((sym_idx - 1) + idx, 4));
+end
+
+function [data_bins, pilot_bins, used_bins] = ofdm_bin_plan(p)
+    used_bins = p.used_bins(:).';
+    pilot_bins = select_pilot_bins(p, used_bins);
+    data_bins = setdiff(used_bins, pilot_bins, 'stable');
+end
+
+function pilot_bins = select_pilot_bins(p, used_bins)
+    pilot_bins = [];
+    if ~pilots_enabled(p)
+        return;
+    end
+
+    if isfield(p, 'pilot_bins') && ~isempty(p.pilot_bins)
+        candidates = p.pilot_bins(:).';
+    else
+        candidates = used_bins;
+    end
+    pilot_bins = intersect(used_bins, candidates, 'stable');
+
+    np = requested_num_pilots(p);
+    if ~isempty(np)
+        np = max(0, min(np, numel(pilot_bins)));
+        pilot_bins = pilot_bins(1:np);
+    end
+end
+
+function np = requested_num_pilots(p)
+    np = [];
+    if isfield(p, 'num_pilots') && ~isempty(p.num_pilots)
+        np = round(double(p.num_pilots(1)));
+        if ~isfinite(np)
+            np = [];
+        end
+    end
+end
+
+function on = pilots_enabled(p)
+    if isfield(p, 'use_pilots') && ~isempty(p.use_pilots)
+        on = logical(p.use_pilots);
+        return;
+    end
+    on = strcmpi(p.modulation, 'QPSK');
+end
+
+function [has_pilot, pilot_pos, data_pos] = bin_positions(used_bins, pilot_bins, data_bins)
+    if isempty(pilot_bins)
+        has_pilot = false;
+        pilot_pos = [];
+    else
+        [tfp, pilot_pos] = ismember(pilot_bins, used_bins);
+        has_pilot = all(tfp);
+        if ~has_pilot
+            pilot_pos = [];
+        end
+    end
+    [tfd, data_pos] = ismember(data_bins, used_bins);
+    if ~all(tfd)
+        data_pos = [];
+    end
+end
+
 function crc = crc16_ccitt(data)
     crc = uint16(hex2dec('FFFF'));
     poly = uint16(hex2dec('1021'));
@@ -657,7 +748,10 @@ function p = default_params()
     p.Nfft = 96;
     p.Ncp = 72;
     p.used_bins = [2 3 4 5];
+    p.pilot_bins = [2 4];
+    p.num_pilots = [];
     p.modulation = 'BPSK';
+    p.use_pilots = [];
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;

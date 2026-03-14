@@ -53,9 +53,13 @@ end
 
 function [tx_audio, dbg] = tx_one_packet(pkt_bytes, p)
     bits = bytes_to_bits(pkt_bytes);
+    [data_bins, pilot_bins, used_bins] = ofdm_bin_plan(p);
 
     [payload_syms, bps] = map_bits(bits, p.modulation); %#ok<NASGU>
-    num_data_carriers = numel(p.used_bins);
+    num_data_carriers = numel(data_bins);
+    if num_data_carriers <= 0
+        error('No data carriers left after pilot allocation');
+    end
     syms_per_ofdm = num_data_carriers;
     num_data_ofdm = ceil(numel(payload_syms) / syms_per_ofdm);
 
@@ -66,15 +70,18 @@ function [tx_audio, dbg] = tx_one_packet(pkt_bytes, p)
     payload_grid = reshape(payload_syms, syms_per_ofdm, num_data_ofdm);
 
     Xtrain = zeros(p.Nfft, 1);
-    train_known = known_training_symbols(num_data_carriers, p.modulation);
-    Xtrain(p.used_bins) = train_known;
+    train_known = known_training_symbols(numel(used_bins), p.modulation);
+    Xtrain(used_bins) = train_known;
     xtrain = ifft(Xtrain, p.Nfft);
     xtrain_cp = [xtrain(end-p.Ncp+1:end); xtrain];
 
     xdata = [];
     for i = 1:num_data_ofdm
         X = zeros(p.Nfft, 1);
-        X(p.used_bins) = payload_grid(:, i);
+        X(data_bins) = payload_grid(:, i);
+        if ~isempty(pilot_bins)
+            X(pilot_bins) = known_pilot_symbols(numel(pilot_bins), i);
+        end
         xt = ifft(X, p.Nfft);
         xt_cp = [xt(end-p.Ncp+1:end); xt];
         xdata = [xdata; xt_cp]; %#ok<AGROW>
@@ -104,6 +111,8 @@ function [tx_audio, dbg] = tx_one_packet(pkt_bytes, p)
     dbg.train_known = train_known;
     dbg.num_data_ofdm = num_data_ofdm;
     dbg.payload_grid = payload_grid;
+    dbg.data_bins = data_bins;
+    dbg.pilot_bins = pilot_bins;
 end
 
 function p = default_params()
@@ -112,7 +121,10 @@ function p = default_params()
     p.Nfft = 96;
     p.Ncp = 72;
     p.used_bins = [2 3 4 5];
+    p.pilot_bins = [2 4];
+    p.num_pilots = [];
     p.modulation = 'BPSK';
+    p.use_pilots = [];
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;
@@ -123,6 +135,55 @@ function p = default_params()
     p.packet_payload_bytes = 24;
     p.session_id = uint16(1234);
     p.disable_modulation = false;
+end
+
+function [data_bins, pilot_bins, used_bins] = ofdm_bin_plan(p)
+    used_bins = p.used_bins(:).';
+    pilot_bins = select_pilot_bins(p, used_bins);
+    data_bins = setdiff(used_bins, pilot_bins, 'stable');
+end
+
+function pilot_bins = select_pilot_bins(p, used_bins)
+    pilot_bins = [];
+    if ~pilots_enabled(p)
+        return;
+    end
+
+    if isfield(p, 'pilot_bins') && ~isempty(p.pilot_bins)
+        candidates = p.pilot_bins(:).';
+    else
+        candidates = used_bins;
+    end
+    pilot_bins = intersect(used_bins, candidates, 'stable');
+
+    np = requested_num_pilots(p);
+    if ~isempty(np)
+        np = max(0, min(np, numel(pilot_bins)));
+        pilot_bins = pilot_bins(1:np);
+    end
+end
+
+function np = requested_num_pilots(p)
+    np = [];
+    if isfield(p, 'num_pilots') && ~isempty(p.num_pilots)
+        np = round(double(p.num_pilots(1)));
+        if ~isfinite(np)
+            np = [];
+        end
+    end
+end
+
+function on = pilots_enabled(p)
+    if isfield(p, 'use_pilots') && ~isempty(p.use_pilots)
+        on = logical(p.use_pilots);
+        return;
+    end
+    on = strcmpi(p.modulation, 'QPSK');
+end
+
+function p = known_pilot_symbols(N, sym_idx)
+    idx = (0:N-1).';
+    p = exp(1j * pi/2 * mod((sym_idx - 1) + idx, 4));
 end
 
 function chunks = split_payload(payload, chunk_size)

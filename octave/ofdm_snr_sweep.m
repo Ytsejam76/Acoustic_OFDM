@@ -26,7 +26,14 @@ function stats = ofdm_snr_sweep(varargin)
         user_cfg = varargin{1};
         f = fieldnames(user_cfg);
         for i = 1:numel(f)
-            cfg.(f{i}) = user_cfg.(f{i});
+            if strcmp(f{i}, 'base_params') && isstruct(user_cfg.base_params)
+                bf = fieldnames(user_cfg.base_params);
+                for bi = 1:numel(bf)
+                    cfg.base_params.(bf{bi}) = user_cfg.base_params.(bf{bi});
+                end
+            else
+                cfg.(f{i}) = user_cfg.(f{i});
+            end
         end
     end
 
@@ -268,7 +275,10 @@ function p = default_base_params()
     p.Nfft = 96;
     p.Ncp = 72;
     p.used_bins = [2 3 4 5];
+    p.pilot_bins = [2 4];
+    p.num_pilots = [];
     p.modulation = 'BPSK';
+    p.use_pilots = [];
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;

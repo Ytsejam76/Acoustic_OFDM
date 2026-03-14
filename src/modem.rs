@@ -140,9 +140,13 @@ fn tx_one_packet(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
 /// Returns:
 /// - `Vec<Complex32>`: baseband complex samples.
 fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> {
+    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
     let bits = bytes_to_bits(pkt_bytes);
     let mut payload_syms = map_bits(&bits, cfg.modulation);
-    let syms_per_ofdm = cfg.used_bins.len();
+    let syms_per_ofdm = data_bins.len();
+    if syms_per_ofdm == 0 {
+        return Vec::new();
+    }
     let n_data = payload_syms.len().div_ceil(syms_per_ofdm);
     payload_syms.resize(n_data * syms_per_ofdm, Complex32::new(0.0, 0.0));
 
@@ -151,9 +155,9 @@ fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> 
     xbb.extend_from_slice(&sync_half);
     xbb.extend_from_slice(&sync_half);
 
-    let train_known = known_training_symbols(cfg.used_bins.len(), cfg.modulation);
+    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut xtrain = vec![Complex32::new(0.0, 0.0); cfg.nfft];
-    for (k, &bin) in cfg.used_bins.iter().enumerate() {
+    for (k, &bin) in used_bins.iter().enumerate() {
         xtrain[bin] = train_known[k];
     }
     let train_time = ifft(&xtrain);
@@ -161,8 +165,14 @@ fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> 
 
     for i in 0..n_data {
         let mut x = vec![Complex32::new(0.0, 0.0); cfg.nfft];
-        for (k, &bin) in cfg.used_bins.iter().enumerate() {
+        for (k, &bin) in data_bins.iter().enumerate() {
             x[bin] = payload_syms[i * syms_per_ofdm + k];
+        }
+        if !pilot_bins.is_empty() {
+            let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
+            for (k, &bin) in pilot_bins.iter().enumerate() {
+                x[bin] = pref[k];
+            }
         }
         let xt = ifft(&x);
         append_cp_symbol(&mut xbb, &xt, cfg.ncp);
@@ -190,6 +200,11 @@ pub fn decode_packet_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Vec
 /// Returns:
 /// - `Option<PacketInfo>`: parsed packet metadata, or `None` on failure.
 fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<PacketInfo> {
+    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
+    let n_data_carriers = data_bins.len();
+    if n_data_carriers == 0 {
+        return None;
+    }
     let xsync_len = 2 * cfg.sync_half_len;
     let train_len = cfg.nfft + cfg.ncp;
     if rbb.len() < xsync_len + train_len {
@@ -200,9 +215,9 @@ fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Pa
     let train_no_cp = &rbb[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
     let ytrain = fft(train_no_cp);
 
-    let train_known = known_training_symbols(cfg.used_bins.len(), cfg.modulation);
-    let mut hest = vec![Complex32::new(1.0, 0.0); cfg.used_bins.len()];
-    for (k, &bin) in cfg.used_bins.iter().enumerate() {
+    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
+    let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
+    for (k, &bin) in used_bins.iter().enumerate() {
         hest[k] = ytrain[bin] / train_known[k];
     }
 
@@ -210,7 +225,7 @@ fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Pa
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
     let max_bits = max_payload_bytes * 8;
-    let max_data_ofdm = max_bits.div_ceil(cfg.used_bins.len() * cfg.modulation.bits_per_symbol()) + 2;
+    let max_data_ofdm = max_bits.div_ceil(n_data_carriers * cfg.modulation.bits_per_symbol()) + 2;
     let mut rx_syms = Vec::<Complex32>::new();
 
     for i in 0..max_data_ofdm {
@@ -220,12 +235,34 @@ fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Pa
             break;
         }
         let y = fft(&rbb[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
-        let mut xeq = Vec::with_capacity(cfg.used_bins.len());
-        for (k, &bin) in cfg.used_bins.iter().enumerate() {
-            xeq.push(y[bin] / hest[k]);
+        let mut xeq_used = Vec::with_capacity(used_bins.len());
+        for (k, &bin) in used_bins.iter().enumerate() {
+            xeq_used.push(y[bin] / hest[k]);
         }
-
-        rx_syms.extend(xeq);
+        if !pilot_bins.is_empty() {
+            let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
+            let mut num = Complex32::new(0.0, 0.0);
+            let mut den = 0.0f32;
+            for (k, pbin) in pilot_bins.iter().enumerate() {
+                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                    num += xeq_used[pos] * pref[k].conj();
+                    den += pref[k].norm_sqr();
+                }
+            }
+            if den > 0.0 {
+                let g = num / den;
+                if g.norm() > 1e-9 {
+                    for v in &mut xeq_used {
+                        *v /= g;
+                    }
+                }
+            }
+        }
+        for dbin in &data_bins {
+            if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
+                rx_syms.push(xeq_used[pos]);
+            }
+        }
 
         let bits = demap_bits(&rx_syms, cfg.modulation);
         let bytes = bits_to_bytes(&bits);
@@ -358,6 +395,56 @@ fn known_training_symbols(n: usize, modulation: Modulation) -> Vec<Complex32> {
                 .collect()
         }
     }
+}
+
+/// Returns known pilot symbols for one OFDM data symbol index.
+///
+/// Parameters:
+/// - `n`: number of pilot carriers.
+/// - `sym_idx`: OFDM symbol index, starting at 1.
+/// Returns:
+/// - `Vec<Complex32>`: deterministic pilot symbols.
+fn known_pilot_symbols(n: usize, sym_idx: usize) -> Vec<Complex32> {
+    (0..n)
+        .map(|k| {
+            let m = ((sym_idx - 1) + k) % 4;
+            Complex32::from_polar(1.0, std::f32::consts::FRAC_PI_2 * (m as f32))
+        })
+        .collect()
+}
+
+/// Splits active bins into used, pilot and data bins.
+///
+/// Parameters:
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `(Vec<usize>, Vec<usize>, Vec<usize>)`: `(used_bins, pilot_bins, data_bins)`.
+fn ofdm_bin_plan(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    let used_bins = cfg.used_bins.clone();
+    let pilots_on = cfg.use_pilots.unwrap_or(matches!(cfg.modulation, Modulation::Qpsk));
+    let pilot_bins = if pilots_on {
+        let mut pilots = if cfg.pilot_bins.is_empty() {
+            used_bins.clone()
+        } else {
+            cfg.pilot_bins
+                .iter()
+                .copied()
+                .filter(|b| used_bins.contains(b))
+                .collect::<Vec<_>>()
+        };
+        if let Some(n) = cfg.num_pilots {
+            pilots.truncate(n.min(pilots.len()));
+        }
+        pilots
+    } else {
+        Vec::new()
+    };
+    let data_bins = used_bins
+        .iter()
+        .copied()
+        .filter(|b| !pilot_bins.contains(b))
+        .collect::<Vec<_>>();
+    (used_bins, pilot_bins, data_bins)
 }
 
 /// Returns one half of the repeated sync preamble.
@@ -593,6 +680,18 @@ mod tests {
     }
 
     #[test]
+    /// Verifies QPSK oracle burst round-trip with pilots explicitly disabled.
+    fn round_trip_oracle_burst_qpsk_no_pilots() {
+        let mut cfg = OfdmConfig::default();
+        cfg.modulation = Modulation::Qpsk;
+        cfg.use_pilots = Some(false);
+        let payload = (0..80u8).collect::<Vec<_>>();
+        let tx = encode_payload(&payload, &cfg);
+        let rx = decode_encoded_burst_oracle(&tx, &cfg).expect("decode failed");
+        assert_eq!(rx, payload);
+    }
+
+    #[test]
     /// Verifies baseband packet encode/decode path.
     fn decode_single_packet_baseband() {
         let cfg = OfdmConfig::default();
@@ -633,6 +732,20 @@ mod tests {
         assert_eq!(qpsk_s[1], Complex32::new(1.0 * k, -1.0 * k));
         assert_eq!(qpsk_s[2], Complex32::new(-1.0 * k, 1.0 * k));
         assert_eq!(qpsk_s[3], Complex32::new(-1.0 * k, -1.0 * k));
+    }
+
+    #[test]
+    /// Verifies pilot count is capped by `num_pilots`.
+    fn pilot_count_capped_by_num_pilots() {
+        let mut cfg = OfdmConfig::default();
+        cfg.modulation = Modulation::Qpsk;
+        cfg.use_pilots = Some(true);
+        cfg.used_bins = vec![2, 3, 4, 5];
+        cfg.pilot_bins = vec![2, 4, 5];
+        cfg.num_pilots = Some(2);
+        let (_used, pilots, data) = ofdm_bin_plan(&cfg);
+        assert_eq!(pilots, vec![2, 4]);
+        assert_eq!(data, vec![3, 5]);
     }
 }
 

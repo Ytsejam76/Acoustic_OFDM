@@ -8,7 +8,7 @@ function [result, dbg, tx_audio, rx_audio, payload, p] = ofdm_test_channel(varar
 % This function:
 %   1. generates a random payload
 %   2. encodes it to passband audio
-%   3. applies a simple test channel
+%   3. applies a configurable test channel
 %   4. decodes the received audio
 %   5. plots waveform, sync metric, and constellation
 
@@ -47,6 +47,12 @@ function [result, dbg, tx_audio, rx_audio, payload, p] = ofdm_test_channel(varar
         fprintf('Channel SNR: %.1f dB\n', p.snr_db);
         fprintf('Channel CFO: %.2f Hz\n', p.cfo_hz);
         fprintf('Timing offset: %d samples\n', p.timing_offset);
+        if ~isempty(p.echo_delays_ms) && ~isempty(p.echo_gains)
+            fprintf('Echoes: %d (delays ms: %s, gains: %s)\n', ...
+                numel(p.echo_delays_ms), mat2str(p.echo_delays_ms), mat2str(p.echo_gains));
+        else
+            fprintf('Echoes: disabled\n');
+        end
         if isnan(result.ber)
             fprintf('BER: n/a (no overlapping decoded bytes)\n');
         else
@@ -110,6 +116,9 @@ function y = simulate_audio_channel(x, p)
         y = filter(h, 1, y);
     end
 
+    % Explicit configurable echo copies.
+    y = apply_echoes(y, p);
+
     % Frequency error.
     n = (0:length(y)-1).';
     if p.disable_modulation
@@ -136,6 +145,61 @@ function y = simulate_audio_channel(x, p)
     m = max(abs(y));
     if m > 0
         y = 0.85 * y / m;
+    end
+end
+
+function y = apply_echoes(x, p)
+    y = x;
+    if ~isfield(p, 'echo_delays_ms') || ~isfield(p, 'echo_gains')
+        return;
+    end
+    if isempty(p.echo_delays_ms) || isempty(p.echo_gains)
+        return;
+    end
+
+    delays_ms = double(p.echo_delays_ms(:));
+    gains = double(p.echo_gains(:));
+    ne = min(numel(delays_ms), numel(gains));
+    if ne <= 0
+        return;
+    end
+    delays_ms = delays_ms(1:ne);
+    gains = gains(1:ne);
+
+    if isfield(p, 'echo_phases_deg') && ~isempty(p.echo_phases_deg)
+        phases_deg = double(p.echo_phases_deg(:));
+        if numel(phases_deg) < ne
+            phases_deg(end+1:ne, 1) = 0;
+        else
+            phases_deg = phases_deg(1:ne);
+        end
+    else
+        phases_deg = zeros(ne, 1);
+    end
+
+    dly = round(delays_ms * 1e-3 * p.fs);
+    dly(dly < 0) = 0;
+    cg = gains .* exp(1j * deg2rad(phases_deg));
+
+    if isreal(x)
+        xa = analytic_signal(x);
+        ya = xa;
+        for i = 1:ne
+            di = dly(i);
+            if di >= numel(xa)
+                continue;
+            end
+            ya(di+1:end) = ya(di+1:end) + cg(i) * xa(1:end-di);
+        end
+        y = real(ya);
+    else
+        for i = 1:ne
+            di = dly(i);
+            if di >= numel(x)
+                continue;
+            end
+            y(di+1:end) = y(di+1:end) + cg(i) * x(1:end-di);
+        end
     end
 end
 
@@ -293,6 +357,9 @@ function p = default_params()
     p.cfo_hz = 4;
     p.timing_offset = 120;
     p.channel_taps = [1.0; 0.22; -0.08];
+    p.echo_delays_ms = [];
+    p.echo_gains = [];
+    p.echo_phases_deg = [];
     p.apply_am_ripple = true;
     p.am_ripple_depth = 0.03;
     p.am_ripple_hz = 40;

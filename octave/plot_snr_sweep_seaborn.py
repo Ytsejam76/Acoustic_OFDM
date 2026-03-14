@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Elias S. G. Carotti
 """Render BER/PER vs SNR plots from Octave stats using seaborn."""
 
 from __future__ import annotations

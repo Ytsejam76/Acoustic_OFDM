@@ -79,3 +79,5 @@ In 2014, the initial idea used a much more ambitious constellation strategy (16-
 This repository is a new attempt focused on making OFDM synchronization and packet handling solid first.
 
 <img src="images/16-QAM.jpg" alt="16-QAM constellation sketch" />
+
+Copyright (c) 2026 Elias S. G. Carotti

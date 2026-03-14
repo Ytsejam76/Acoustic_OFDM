@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Elias S. G. Carotti
+
 pub mod config;
 pub mod crc;
 pub mod packet;

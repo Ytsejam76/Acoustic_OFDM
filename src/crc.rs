@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Elias S. G. Carotti
+
 /// Computes CRC-16/CCITT-FALSE over `data`.
 ///
 /// Parameters:

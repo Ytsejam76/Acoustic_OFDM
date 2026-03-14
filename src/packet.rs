@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Elias S. G. Carotti
+
 use crate::config::{Modulation, OfdmConfig};
 use crate::crc::crc16_ccitt;
 

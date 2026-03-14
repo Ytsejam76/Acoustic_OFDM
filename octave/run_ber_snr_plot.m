@@ -1,3 +1,5 @@
+% Copyright (c) 2026 Elias S. G. Carotti
+
 % RUN_BER_SNR_PLOT  Generate BER/PER vs SNR plot for the OFDM link.
 %
 % Run:

@@ -76,6 +76,15 @@ octave --quiet run_ber_snr_plot.m --mod BPSK
 
 # Both (default if --mod is omitted)
 octave --quiet run_ber_snr_plot.m --mod both
+
+# Both, with explicit multipath echo profile
+octave --quiet run_ber_snr_plot.m --mod both --echo cp_mix
+
+# Both, single plot including all echo profiles (none + room_mild + cp_mix)
+octave --quiet run_ber_snr_plot.m --mod both --echo all
+
+# Custom output filename (default is ber_per_snr.png)
+octave --quiet run_ber_snr_plot.m --mod both --echo all --output my_experiment.png
 ```
 
 The script calls `./.venv/bin/python3 plot_snr_sweep_seaborn.py` for final rendering, so set up the venv first.
@@ -90,9 +99,8 @@ python3 -m venv .venv
 
 Generated files are written to `images/`:
 
-- QPSK: `ber_per_vs_snr_qpsk.png`, `ber_per_vs_snr_qpsk_raw.png`
-- BPSK: `ber_per_vs_snr_bpsk.png`, `ber_per_vs_snr_bpsk_raw.png`
-- Backward-compatible aliases for BPSK: `ber_per_vs_snr.png`, `ber_per_vs_snr_raw.png`
+- For any run mode, the final output plot is: `ber_per_snr.png`
+- You can override the filename with `--output FILENAME.png`.
 
 ## Current modem design (short-burst)
 

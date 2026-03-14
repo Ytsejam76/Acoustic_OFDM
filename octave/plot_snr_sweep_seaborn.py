@@ -46,6 +46,28 @@ def parse_stats(path: Path):
     return stats, None, False
 
 
+def pick_ber_field(stats):
+    if "ber_effective" in stats:
+        ber = as_array(stats["ber_effective"])
+        if np.any(~np.isnan(ber)):
+            return ber, "BER (effective, erasures included)"
+    return as_array(stats["ber_decoded"]), "BER on decoded bits"
+
+
+def collect_curves(stats, mod_label: str):
+    curves = []
+    if "oracle" in stats and "nonoracle" in stats:
+        curves.append({"label": f"{mod_label} oracle", "stats": stats["oracle"], "linestyle": "-"})
+        curves.append({"label": f"{mod_label} estimated", "stats": stats["nonoracle"], "linestyle": "--"})
+    else:
+        curves.append({"label": mod_label, "stats": stats, "linestyle": "-"})
+    return curves
+
+
+def split_csv(s: str):
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
 def apply_theme():
     sns.set_theme(
         style="ticks",
@@ -77,11 +99,11 @@ def plot_compare(oracle, est, out_png: Path, smooth: bool = True):
 
     x1 = as_array(oracle["snr_db"])
     per1 = as_array(oracle["per"])
-    ber1 = as_array(oracle["ber_decoded"])
+    ber1, ber_label = pick_ber_field(oracle)
 
     x2 = as_array(est["snr_db"])
     per2 = as_array(est["per"])
-    ber2 = as_array(est["ber_decoded"])
+    ber2, _ = pick_ber_field(est)
 
     if smooth:
         x1s, per1s = smooth_xy(x1, per1)
@@ -120,7 +142,7 @@ def plot_compare(oracle, est, out_png: Path, smooth: bool = True):
         axes[1].set_yscale("log")
     else:
         axes[1].set_ylim(0, 0.05)
-    axes[1].set_title("BER on Decoded Bits vs SNR")
+    axes[1].set_title(f"{ber_label} vs SNR")
     axes[1].set_xlabel("SNR (dB)")
     axes[1].set_ylabel("BER")
     axes[1].legend(loc="upper right", frameon=True)
@@ -135,7 +157,7 @@ def plot_single(stats, out_png: Path, smooth: bool = True):
 
     x = as_array(stats["snr_db"])
     per = as_array(stats["per"])
-    ber = as_array(stats["ber_decoded"])
+    ber, ber_label = pick_ber_field(stats)
     dec = as_array(stats["decode_rate"])
 
     if smooth:
@@ -167,7 +189,7 @@ def plot_single(stats, out_png: Path, smooth: bool = True):
         axes[1].set_yscale("log")
     else:
         axes[1].set_ylim(0, 0.05)
-    axes[1].set_title("BER on Decoded Bits vs SNR")
+    axes[1].set_title(f"{ber_label} vs SNR")
     axes[1].set_xlabel("SNR (dB)")
     axes[1].set_ylabel("BER")
 
@@ -175,22 +197,214 @@ def plot_single(stats, out_png: Path, smooth: bool = True):
     plt.close(fig)
 
 
+def plot_modulation_compare(stats_bpsk, stats_qpsk, out_png: Path, smooth: bool = True):
+    apply_theme()
+    fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True, constrained_layout=True)
+    curves = collect_curves(stats_bpsk, "BPSK") + collect_curves(stats_qpsk, "QPSK")
+
+    for c in curves:
+        st = c["stats"]
+        x = as_array(st["snr_db"])
+        per = as_array(st["per"])
+        if smooth:
+            xs, ys = smooth_xy(x, per)
+            sns.lineplot(
+                x=xs,
+                y=np.clip(ys, 0, 1),
+                linewidth=2.4,
+                linestyle=c["linestyle"],
+                label=f'{c["label"]} (smooth)',
+                ax=axes[0],
+            )
+        else:
+            sns.lineplot(
+                x=x,
+                y=per,
+                marker="o",
+                linewidth=2.0,
+                linestyle=c["linestyle"],
+                label=c["label"],
+                ax=axes[0],
+            )
+        sns.scatterplot(x=x, y=per, s=30, color=axes[0].lines[-1].get_color(), ax=axes[0], legend=False)
+
+    axes[0].set_title("Packet Error Rate vs SNR (BPSK vs QPSK)")
+    axes[0].set_xlabel("SNR (dB)")
+    axes[0].set_ylabel("PER")
+    axes[0].set_ylim(0, 1)
+    axes[0].legend(loc="upper right", frameon=True)
+
+    has_positive = False
+    for c in curves:
+        st = c["stats"]
+        x = as_array(st["snr_db"])
+        ber, _ = pick_ber_field(st)
+        m = ~np.isnan(ber)
+        if not np.any(m):
+            continue
+        has_positive = has_positive or np.any(ber[m] > 0)
+        if smooth:
+            xs, ys = smooth_xy(x[m], ber[m])
+            sns.lineplot(
+                x=xs,
+                y=np.maximum(ys, 0),
+                linewidth=2.4,
+                linestyle=c["linestyle"],
+                label=f'{c["label"]} (smooth)',
+                ax=axes[1],
+            )
+        else:
+            sns.lineplot(
+                x=x[m],
+                y=np.maximum(ber[m], 0),
+                marker="o",
+                linewidth=2.0,
+                linestyle=c["linestyle"],
+                label=c["label"],
+                ax=axes[1],
+            )
+        sns.scatterplot(x=x[m], y=ber[m], s=30, color=axes[1].lines[-1].get_color(), ax=axes[1], legend=False)
+
+    if has_positive:
+        axes[1].set_yscale("log")
+    else:
+        axes[1].set_ylim(0, 0.05)
+    axes[1].set_title("BER (effective, erasures included) vs SNR (BPSK vs QPSK)")
+    axes[1].set_xlabel("SNR (dB)")
+    axes[1].set_ylabel("BER")
+    axes[1].legend(loc="upper right", frameon=True)
+
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+
+
+def plot_modulation_compare_groups(groups, out_png: Path, smooth: bool = True):
+    apply_theme()
+    fig, axes = plt.subplots(2, 1, figsize=(12, 9.5), sharex=True, constrained_layout=True)
+    curves = []
+    for g in groups:
+        label = g["label"]
+        curves.extend(collect_curves(g["bpsk"], f"BPSK [{label}]"))
+        curves.extend(collect_curves(g["qpsk"], f"QPSK [{label}]"))
+
+    for c in curves:
+        st = c["stats"]
+        x = as_array(st["snr_db"])
+        per = as_array(st["per"])
+        if smooth:
+            xs, ys = smooth_xy(x, per)
+            sns.lineplot(
+                x=xs,
+                y=np.clip(ys, 0, 1),
+                linewidth=2.0,
+                linestyle=c["linestyle"],
+                label=f'{c["label"]} (smooth)',
+                ax=axes[0],
+            )
+        else:
+            sns.lineplot(
+                x=x,
+                y=per,
+                marker="o",
+                linewidth=1.8,
+                linestyle=c["linestyle"],
+                label=c["label"],
+                ax=axes[0],
+            )
+
+    axes[0].set_title("Packet Error Rate vs SNR (All Echo Profiles)")
+    axes[0].set_xlabel("SNR (dB)")
+    axes[0].set_ylabel("PER")
+    axes[0].set_ylim(0, 1)
+    axes[0].legend(loc="upper right", frameon=True, fontsize=9)
+
+    has_positive = False
+    for c in curves:
+        st = c["stats"]
+        x = as_array(st["snr_db"])
+        ber, _ = pick_ber_field(st)
+        m = ~np.isnan(ber)
+        if not np.any(m):
+            continue
+        has_positive = has_positive or np.any(ber[m] > 0)
+        if smooth:
+            xs, ys = smooth_xy(x[m], ber[m])
+            sns.lineplot(
+                x=xs,
+                y=np.maximum(ys, 0),
+                linewidth=2.0,
+                linestyle=c["linestyle"],
+                label=f'{c["label"]} (smooth)',
+                ax=axes[1],
+            )
+        else:
+            sns.lineplot(
+                x=x[m],
+                y=np.maximum(ber[m], 0),
+                marker="o",
+                linewidth=1.8,
+                linestyle=c["linestyle"],
+                label=c["label"],
+                ax=axes[1],
+            )
+
+    if has_positive:
+        axes[1].set_yscale("log")
+    else:
+        axes[1].set_ylim(0, 0.05)
+    axes[1].set_title("BER (effective, erasures included) vs SNR (All Echo Profiles)")
+    axes[1].set_xlabel("SNR (dB)")
+    axes[1].set_ylabel("BER")
+    axes[1].legend(loc="upper right", frameon=True, fontsize=9)
+
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stats", required=True, help="Path to snr_sweep_stats.mat")
+    ap.add_argument("--stats", help="Path to single snr_sweep_stats.mat")
+    ap.add_argument("--stats-bpsk", help="Path to BPSK snr_sweep_stats.mat")
+    ap.add_argument("--stats-qpsk", help="Path to QPSK snr_sweep_stats.mat")
+    ap.add_argument("--stats-bpsk-list", help="Comma-separated BPSK stats paths (grouped)")
+    ap.add_argument("--stats-qpsk-list", help="Comma-separated QPSK stats paths (grouped)")
+    ap.add_argument("--labels", help="Comma-separated labels for grouped stats")
     ap.add_argument("--out", required=True, help="Output PNG path")
     ap.add_argument("--no-smooth", action="store_true", help="Disable curve smoothing")
     args = ap.parse_args()
 
-    stats_path = Path(args.stats)
     out_png = Path(args.out)
     out_png.parent.mkdir(parents=True, exist_ok=True)
 
-    s1, s2, is_compare = parse_stats(stats_path)
-    if is_compare:
-        plot_compare(s1, s2, out_png, smooth=not args.no_smooth)
+    if args.stats_bpsk_list and args.stats_qpsk_list and args.labels:
+        bpsk_paths = split_csv(args.stats_bpsk_list)
+        qpsk_paths = split_csv(args.stats_qpsk_list)
+        labels = split_csv(args.labels)
+        n = len(labels)
+        if len(bpsk_paths) != n or len(qpsk_paths) != n:
+            raise SystemExit("Grouped stats args must have the same number of items")
+        groups = []
+        for i in range(n):
+            groups.append(
+                {
+                    "label": labels[i],
+                    "bpsk": loadmat(Path(bpsk_paths[i]), simplify_cells=True)["stats"],
+                    "qpsk": loadmat(Path(qpsk_paths[i]), simplify_cells=True)["stats"],
+                }
+            )
+        plot_modulation_compare_groups(groups, out_png, smooth=not args.no_smooth)
+    elif args.stats_bpsk and args.stats_qpsk:
+        bpsk = loadmat(Path(args.stats_bpsk), simplify_cells=True)["stats"]
+        qpsk = loadmat(Path(args.stats_qpsk), simplify_cells=True)["stats"]
+        plot_modulation_compare(bpsk, qpsk, out_png, smooth=not args.no_smooth)
+    elif args.stats:
+        s1, s2, is_compare = parse_stats(Path(args.stats))
+        if is_compare:
+            plot_compare(s1, s2, out_png, smooth=not args.no_smooth)
+        else:
+            plot_single(s1, out_png, smooth=not args.no_smooth)
     else:
-        plot_single(s1, out_png, smooth=not args.no_smooth)
+        raise SystemExit("Provide --stats or both --stats-bpsk and --stats-qpsk")
     print(f"Saved seaborn plot to: {out_png}")
 
 

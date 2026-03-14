@@ -13,13 +13,15 @@ function stats = ofdm_snr_sweep(varargin)
 %   compare_oracle        : if true, run both oracle and estimated sync
 %   show_progress         : if true, print live progress bar
 %   base_params           : struct merged into each test run
+%     - echo_profile      : named echo preset ('none' | 'room_mild' | 'cp_mix')
 %   save_plot             : if true, save summary plot
 %   out_dir               : output directory for plot and .mat stats
 %   plot_filename         : output image name
 %
 % Returned stats fields:
 %   snr_db, per, decode_rate, ber_decoded, success_count, decoded_count,
-%   bit_errors, bit_total, num_trials, cfg
+%   bit_errors, bit_total, erasure_bits, total_tx_bits, ber_effective,
+%   num_trials, cfg
 
     cfg = default_cfg();
     if nargin >= 1 && ~isempty(varargin{1})
@@ -74,6 +76,8 @@ function stats = run_one_sweep(cfg, oracle_sync, mode_label)
     decoded_count = zeros(nsnr, 1);
     bit_errors = zeros(nsnr, 1);
     bit_total = zeros(nsnr, 1);
+    erasure_bits = zeros(nsnr, 1);
+    total_tx_bits = zeros(nsnr, 1);
 
     total_trials = nsnr * cfg.num_trials;
     done_trials = 0;
@@ -90,6 +94,7 @@ function stats = run_one_sweep(cfg, oracle_sync, mode_label)
         for t = 1:cfg.num_trials
             p = cfg.base_params;
             p.snr_db = snr;
+            p = apply_echo_profile(p);
             p.pause_before_exit = false;
             p.make_plots = false;
             p.save_images = false;
@@ -108,12 +113,15 @@ function stats = run_one_sweep(cfg, oracle_sync, mode_label)
             end
 
             result = ofdm_test_channel(p);
+            tx_bits_this = 8 * double(p.payload_bytes);
             success_count(si) = success_count(si) + double(result.success);
+            total_tx_bits(si) = total_tx_bits(si) + tx_bits_this;
             if result.bit_total_compared > 0
                 decoded_count(si) = decoded_count(si) + 1;
                 bit_errors(si) = bit_errors(si) + double(result.bit_errors);
                 bit_total(si) = bit_total(si) + double(result.bit_total_compared);
             end
+            erasure_bits(si) = erasure_bits(si) + max(0, tx_bits_this - double(result.bit_total_compared));
 
             done_trials = done_trials + 1;
             if cfg.show_progress
@@ -128,9 +136,13 @@ function stats = run_one_sweep(cfg, oracle_sync, mode_label)
     per = 1 - (success_count / cfg.num_trials);
     decode_rate = decoded_count / cfg.num_trials;
     ber_decoded = NaN(nsnr, 1);
+    ber_effective = NaN(nsnr, 1);
     for si = 1:nsnr
         if bit_total(si) > 0
             ber_decoded(si) = bit_errors(si) / bit_total(si);
+        end
+        if total_tx_bits(si) > 0
+            ber_effective(si) = (bit_errors(si) + erasure_bits(si)) / total_tx_bits(si);
         end
     end
 
@@ -143,6 +155,9 @@ function stats = run_one_sweep(cfg, oracle_sync, mode_label)
     stats.decoded_count = decoded_count;
     stats.bit_errors = bit_errors;
     stats.bit_total = bit_total;
+    stats.erasure_bits = erasure_bits;
+    stats.total_tx_bits = total_tx_bits;
+    stats.ber_effective = ber_effective;
     stats.num_trials = cfg.num_trials;
     stats.oracle_sync = oracle_sync;
 end
@@ -151,15 +166,20 @@ function print_summary(stats, label)
     fprintf('\n==== OFDM SNR SWEEP ====\n');
     fprintf('Mode: %s\n', label);
     fprintf('Trials per SNR: %d\n', stats.num_trials);
-    fprintf('SNR(dB)   PER      DecodeRate   BER(decoded)\n');
+    fprintf('SNR(dB)   PER      DecodeRate   BER(decoded)   BER(effective)\n');
     for i = 1:numel(stats.snr_db)
         if isnan(stats.ber_decoded(i))
             ber_str = 'n/a';
         else
             ber_str = sprintf('%.3e', stats.ber_decoded(i));
         end
-        fprintf('%7.1f   %6.3f   %10.3f   %s\n', ...
-            stats.snr_db(i), stats.per(i), stats.decode_rate(i), ber_str);
+        if isfield(stats, 'ber_effective') && ~isnan(stats.ber_effective(i))
+            ber_eff_str = sprintf('%.3e', stats.ber_effective(i));
+        else
+            ber_eff_str = 'n/a';
+        end
+        fprintf('%7.1f   %6.3f   %10.3f   %s   %s\n', ...
+            stats.snr_db(i), stats.per(i), stats.decode_rate(i), ber_str, ber_eff_str);
     end
 end
 
@@ -179,16 +199,20 @@ function plot_sweep(stats)
     ylim([0 1]);
 
     subplot(2,1,2);
-    idx = ~isnan(stats.ber_decoded);
+    ber_plot = stats.ber_decoded;
+    if isfield(stats, 'ber_effective') && ~all(isnan(stats.ber_effective))
+        ber_plot = stats.ber_effective;
+    end
+    idx = ~isnan(ber_plot);
     if any(idx)
-        semilogy(stats.snr_db(idx), stats.ber_decoded(idx), '-x', 'linewidth', 1.5);
+        semilogy(stats.snr_db(idx), ber_plot(idx), '-x', 'linewidth', 1.5);
     else
         plot(stats.snr_db, nan(size(stats.snr_db)));
     end
     grid on;
     xlabel('SNR (dB)');
     ylabel('BER');
-    title('BER on Decoded Bits vs SNR');
+    title('BER (effective, erasures included) vs SNR');
 end
 
 function plot_sweep_comparison(stats_oracle, stats_no_oracle)
@@ -209,24 +233,32 @@ function plot_sweep_comparison(stats_oracle, stats_no_oracle)
     subplot(2,1,2);
     h = [];
     labels = {};
-    idx1 = ~isnan(stats_oracle.ber_decoded);
-    idx2 = ~isnan(stats_no_oracle.ber_decoded);
+    b1 = stats_oracle.ber_decoded;
+    b2 = stats_no_oracle.ber_decoded;
+    if isfield(stats_oracle, 'ber_effective') && ~all(isnan(stats_oracle.ber_effective))
+        b1 = stats_oracle.ber_effective;
+    end
+    if isfield(stats_no_oracle, 'ber_effective') && ~all(isnan(stats_no_oracle.ber_effective))
+        b2 = stats_no_oracle.ber_effective;
+    end
+    idx1 = ~isnan(b1);
+    idx2 = ~isnan(b2);
     if any(idx1)
-        h(end+1) = semilogy(stats_oracle.snr_db(idx1), stats_oracle.ber_decoded(idx1), '-x', 'linewidth', 1.5); %#ok<AGROW>
+        h(end+1) = semilogy(stats_oracle.snr_db(idx1), b1(idx1), '-x', 'linewidth', 1.5); %#ok<AGROW>
         labels{end+1} = 'Oracle sync'; %#ok<AGROW>
         hold on;
     else
         hold on;
     end
     if any(idx2)
-        h(end+1) = semilogy(stats_no_oracle.snr_db(idx2), stats_no_oracle.ber_decoded(idx2), '--d', 'linewidth', 1.5); %#ok<AGROW>
+        h(end+1) = semilogy(stats_no_oracle.snr_db(idx2), b2(idx2), '--d', 'linewidth', 1.5); %#ok<AGROW>
         labels{end+1} = 'Estimated sync'; %#ok<AGROW>
     end
     hold off;
     grid on;
     xlabel('SNR (dB)');
     ylabel('BER');
-    title('BER on Decoded Bits vs SNR');
+    title('BER (effective, erasures included) vs SNR');
     if ~isempty(h)
         legend(h, labels, 'location', 'southwest');
     end
@@ -303,6 +335,10 @@ function p = default_base_params()
     p.cfo_hz = 0;
     p.timing_offset = 0;
     p.channel_taps = 1;
+    p.echo_profile = 'none';
+    p.echo_delays_ms = [];
+    p.echo_gains = [];
+    p.echo_phases_deg = [];
     p.apply_am_ripple = false;
     p.am_ripple_depth = 0.03;
     p.am_ripple_hz = 40;
@@ -315,4 +351,32 @@ function p = default_base_params()
     p.save_decoder_constellation = false;
     p.out_dir = fullfile(pwd, '..', 'images');
     p.verbose = false;
+end
+
+function p = apply_echo_profile(p)
+    profile = 'none';
+    if isfield(p, 'echo_profile') && ~isempty(p.echo_profile)
+        profile = lower(strtrim(char(p.echo_profile)));
+    end
+
+    switch profile
+        case {'', 'none', 'off', 'disabled'}
+            % Keep user-provided explicit echo vectors (or lack thereof).
+        case 'room_mild'
+            % Mild indoor multipath with mostly sub-CP echoes.
+            cp_ms = 1e3 * p.Ncp / p.fs;
+            p.echo_delays_ms = [0.20, 0.55, 0.90, 1.35] * cp_ms;
+            p.echo_gains = [0.25, 0.12, 0.06, 0.03];
+            p.echo_phases_deg = [0, 20, -35, 50];
+        case 'cp_mix'
+            % Mix of echoes both within CP and beyond CP.
+            cp_ms = 1e3 * p.Ncp / p.fs;
+            inside = [0.30, 0.70, 0.93] * cp_ms;
+            outside = [1.35, 2.20] * cp_ms;
+            p.echo_delays_ms = [inside, outside];
+            p.echo_gains = [0.40, 0.28, 0.18, 0.12, 0.08];
+            p.echo_phases_deg = [0, 25, -40, 60, -90];
+        otherwise
+            error('Unknown echo_profile: %s', profile);
+    end
 end

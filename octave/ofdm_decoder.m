@@ -1,3 +1,5 @@
+% Copyright (c) 2026 Elias S. G. Carotti
+
 function [result, dbg] = ofdm_decoder(rx_audio, p)
 % OFDM_DECODER  Decode one or more short acoustic OFDM packets.
 %

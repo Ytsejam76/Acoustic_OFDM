@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Elias S. G. Carotti
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
     Bpsk,

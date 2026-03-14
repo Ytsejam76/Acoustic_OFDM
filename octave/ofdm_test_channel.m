@@ -1,3 +1,5 @@
+% Copyright (c) 2026 Elias S. G. Carotti
+
 function [result, dbg, tx_audio, rx_audio, payload, p] = ofdm_test_channel(varargin)
 % OFDM_TEST_CHANNEL  Simulated loop for the acoustic OFDM toy modem.
 %

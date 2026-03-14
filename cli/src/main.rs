@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Elias S. G. Carotti
+
 use std::error::Error;
 use std::path::Path;
 

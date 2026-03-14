@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Elias S. G. Carotti
+
 use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::config::{Modulation, OfdmConfig};

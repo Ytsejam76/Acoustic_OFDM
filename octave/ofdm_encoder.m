@@ -1,3 +1,5 @@
+% Copyright (c) 2026 Elias S. G. Carotti
+
 function [tx_audio, meta] = ofdm_encoder(payload, p)
 % OFDM_ENCODER  Build a short packetized acoustic OFDM burst.
 %

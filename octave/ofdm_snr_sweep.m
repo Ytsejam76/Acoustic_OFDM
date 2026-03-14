@@ -1,3 +1,5 @@
+% Copyright (c) 2026 Elias S. G. Carotti
+
 function stats = ofdm_snr_sweep(varargin)
 % OFDM_SNR_SWEEP  Monte Carlo sweep of OFDM performance vs SNR.
 %

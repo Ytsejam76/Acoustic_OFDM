@@ -12,6 +12,7 @@ function stats = ofdm_snr_sweep(varargin)
 %   oracle_sync           : if true, force oracle wake/sync/CFO
 %   compare_oracle        : if true, run both oracle and estimated sync
 %   show_progress         : if true, print live progress bar
+%   make_octave_plots     : if true, generate Octave figures
 %   base_params           : struct merged into each test run
 %     - echo_profile      : named echo preset ('none' | 'room_mild' | 'cp_mix')
 %   save_plot             : if true, save summary plot
@@ -50,14 +51,22 @@ function stats = ofdm_snr_sweep(varargin)
 
         print_summary(stats.oracle, 'Oracle sync');
         print_summary(stats.nonoracle, 'Estimated sync');
-        plot_sweep_comparison(stats.oracle, stats.nonoracle);
+        if cfg.make_octave_plots
+            plot_sweep_comparison(stats.oracle, stats.nonoracle);
+        end
     else
         stats = run_one_sweep(cfg, cfg.oracle_sync, ternary(cfg.oracle_sync, 'Oracle sync', 'Estimated sync'));
         print_summary(stats, ternary(cfg.oracle_sync, 'Oracle sync', 'Estimated sync'));
-        plot_sweep(stats);
+        if cfg.make_octave_plots
+            plot_sweep(stats);
+        end
     end
 
     if cfg.save_plot
+        if ~cfg.make_octave_plots
+            warning('save_plot=true ignored because make_octave_plots=false');
+            return;
+        end
         ensure_out_dir(cfg.out_dir);
         fig_path = fullfile(cfg.out_dir, cfg.plot_filename);
         saveas(gcf, fig_path);
@@ -203,11 +212,11 @@ function plot_sweep(stats)
     if isfield(stats, 'ber_effective') && ~all(isnan(stats.ber_effective))
         ber_plot = stats.ber_effective;
     end
-    idx = ~isnan(ber_plot);
+    idx = ~isnan(ber_plot) & (ber_plot > 0);
     if any(idx)
         semilogy(stats.snr_db(idx), ber_plot(idx), '-x', 'linewidth', 1.5);
     else
-        plot(stats.snr_db, nan(size(stats.snr_db)));
+        plot(stats.snr_db, zeros(size(stats.snr_db)));
     end
     grid on;
     xlabel('SNR (dB)');
@@ -241,8 +250,8 @@ function plot_sweep_comparison(stats_oracle, stats_no_oracle)
     if isfield(stats_no_oracle, 'ber_effective') && ~all(isnan(stats_no_oracle.ber_effective))
         b2 = stats_no_oracle.ber_effective;
     end
-    idx1 = ~isnan(b1);
-    idx2 = ~isnan(b2);
+    idx1 = ~isnan(b1) & (b1 > 0);
+    idx2 = ~isnan(b2) & (b2 > 0);
     if any(idx1)
         h(end+1) = semilogy(stats_oracle.snr_db(idx1), b1(idx1), '-x', 'linewidth', 1.5); %#ok<AGROW>
         labels{end+1} = 'Oracle sync'; %#ok<AGROW>
@@ -277,6 +286,7 @@ function cfg = default_cfg()
     cfg.oracle_sync = true;
     cfg.compare_oracle = false;
     cfg.show_progress = true;
+    cfg.make_octave_plots = true;
     cfg.base_params = default_base_params();
     cfg.save_plot = true;
     cfg.out_dir = fullfile(pwd, '..', 'images');

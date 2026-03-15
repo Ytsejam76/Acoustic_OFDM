@@ -108,11 +108,11 @@ def plot_compare(oracle, est, out_png: Path, smooth: bool = True):
     if smooth:
         x1s, per1s = smooth_xy(x1, per1)
         x2s, per2s = smooth_xy(x2, per2)
-        sns.lineplot(x=x1s, y=np.clip(per1s, 0, 1), linewidth=2.5, label="Oracle sync (smooth)", ax=axes[0])
-        sns.lineplot(x=x2s, y=np.clip(per2s, 0, 1), linewidth=2.5, linestyle="--", label="Estimated sync (smooth)", ax=axes[0])
+        sns.lineplot(x=x1s, y=np.clip(per1s, 0, 1), linewidth=1.6, label="Oracle sync (smooth)", ax=axes[0])
+        sns.lineplot(x=x2s, y=np.clip(per2s, 0, 1), linewidth=1.6, linestyle="--", label="Estimated sync (smooth)", ax=axes[0])
     else:
-        sns.lineplot(x=x1, y=per1, marker="o", linewidth=2.0, label="Oracle sync", ax=axes[0])
-        sns.lineplot(x=x2, y=per2, marker="s", linewidth=2.0, linestyle="--", label="Estimated sync", ax=axes[0])
+        sns.lineplot(x=x1, y=per1, marker="o", linewidth=1.2, label="Oracle sync", ax=axes[0])
+        sns.lineplot(x=x2, y=per2, marker="s", linewidth=1.2, linestyle="--", label="Estimated sync", ax=axes[0])
     sns.scatterplot(x=x1, y=per1, s=36, marker="o", color=axes[0].lines[0].get_color(), ax=axes[0], legend=False)
     sns.scatterplot(x=x2, y=per2, s=36, marker="s", color=axes[0].lines[1].get_color(), ax=axes[0], legend=False)
     axes[0].set_title("Packet Error Rate vs SNR")
@@ -127,16 +127,16 @@ def plot_compare(oracle, est, out_png: Path, smooth: bool = True):
     if np.any(m1):
         if smooth:
             x1b, y1b = smooth_xy(x1[m1], ber1[m1])
-            sns.lineplot(x=x1b, y=np.maximum(y1b, 0), linewidth=2.5, label="Oracle sync (smooth)", ax=axes[1])
+            sns.lineplot(x=x1b, y=np.maximum(y1b, 0), linewidth=1.6, label="Oracle sync (smooth)", ax=axes[1])
         else:
-            sns.lineplot(x=x1[m1], y=np.maximum(ber1[m1], 0), marker="o", linewidth=2.0, label="Oracle sync", ax=axes[1])
+            sns.lineplot(x=x1[m1], y=np.maximum(ber1[m1], 0), marker="o", linewidth=1.2, label="Oracle sync", ax=axes[1])
         sns.scatterplot(x=x1[m1], y=ber1[m1], s=36, marker="o", color=axes[1].lines[-1].get_color(), ax=axes[1], legend=False)
     if np.any(m2):
         if smooth:
             x2b, y2b = smooth_xy(x2[m2], ber2[m2])
-            sns.lineplot(x=x2b, y=np.maximum(y2b, 0), linewidth=2.5, linestyle="--", label="Estimated sync (smooth)", ax=axes[1])
+            sns.lineplot(x=x2b, y=np.maximum(y2b, 0), linewidth=1.6, linestyle="--", label="Estimated sync (smooth)", ax=axes[1])
         else:
-            sns.lineplot(x=x2[m2], y=np.maximum(ber2[m2], 0), marker="s", linewidth=2.0, linestyle="--", label="Estimated sync", ax=axes[1])
+            sns.lineplot(x=x2[m2], y=np.maximum(ber2[m2], 0), marker="s", linewidth=1.2, linestyle="--", label="Estimated sync", ax=axes[1])
         sns.scatterplot(x=x2[m2], y=ber2[m2], s=36, marker="s", color=axes[1].lines[-1].get_color(), ax=axes[1], legend=False)
     if has_positive:
         axes[1].set_yscale("log")
@@ -163,11 +163,11 @@ def plot_single(stats, out_png: Path, smooth: bool = True):
     if smooth:
         xs1, ys1 = smooth_xy(x, per)
         xs2, ys2 = smooth_xy(x, 1 - dec)
-        sns.lineplot(x=xs1, y=np.clip(ys1, 0, 1), linewidth=2.5, label="PER (smooth)", ax=axes[0])
-        sns.lineplot(x=xs2, y=np.clip(ys2, 0, 1), linewidth=2.5, linestyle="--", label="1 - Decode rate (smooth)", ax=axes[0])
+        sns.lineplot(x=xs1, y=np.clip(ys1, 0, 1), linewidth=1.6, label="PER (smooth)", ax=axes[0])
+        sns.lineplot(x=xs2, y=np.clip(ys2, 0, 1), linewidth=1.6, linestyle="--", label="1 - Decode rate (smooth)", ax=axes[0])
     else:
-        sns.lineplot(x=x, y=per, marker="o", linewidth=2.0, label="PER", ax=axes[0])
-        sns.lineplot(x=x, y=1 - dec, marker="s", linewidth=2.0, linestyle="--", label="1 - Decode rate", ax=axes[0])
+        sns.lineplot(x=x, y=per, marker="o", linewidth=1.2, label="PER", ax=axes[0])
+        sns.lineplot(x=x, y=1 - dec, marker="s", linewidth=1.2, linestyle="--", label="1 - Decode rate", ax=axes[0])
     sns.scatterplot(x=x, y=per, s=36, marker="o", color=axes[0].lines[0].get_color(), ax=axes[0], legend=False)
     sns.scatterplot(x=x, y=1 - dec, s=36, marker="s", color=axes[0].lines[1].get_color(), ax=axes[0], legend=False)
     axes[0].set_title("Packet Error and Erasure Rates vs SNR")
@@ -181,9 +181,9 @@ def plot_single(stats, out_png: Path, smooth: bool = True):
     if np.any(m):
         if smooth:
             xsb, ysb = smooth_xy(x[m], ber[m])
-            sns.lineplot(x=xsb, y=np.maximum(ysb, 0), linewidth=2.5, label="BER (smooth)", ax=axes[1])
+            sns.lineplot(x=xsb, y=np.maximum(ysb, 0), linewidth=1.6, label="BER (smooth)", ax=axes[1])
         else:
-            sns.lineplot(x=x[m], y=np.maximum(ber[m], 0), marker="o", linewidth=2.0, label="BER", ax=axes[1])
+            sns.lineplot(x=x[m], y=np.maximum(ber[m], 0), marker="o", linewidth=1.2, label="BER", ax=axes[1])
         sns.scatterplot(x=x[m], y=ber[m], s=36, marker="o", color=axes[1].lines[-1].get_color(), ax=axes[1], legend=False)
     if has_positive:
         axes[1].set_yscale("log")
@@ -211,7 +211,7 @@ def plot_modulation_compare(stats_bpsk, stats_qpsk, out_png: Path, smooth: bool 
             sns.lineplot(
                 x=xs,
                 y=np.clip(ys, 0, 1),
-                linewidth=2.4,
+                linewidth=1.5,
                 linestyle=c["linestyle"],
                 label=f'{c["label"]} (smooth)',
                 ax=axes[0],
@@ -221,7 +221,7 @@ def plot_modulation_compare(stats_bpsk, stats_qpsk, out_png: Path, smooth: bool 
                 x=x,
                 y=per,
                 marker="o",
-                linewidth=2.0,
+                linewidth=1.2,
                 linestyle=c["linestyle"],
                 label=c["label"],
                 ax=axes[0],
@@ -248,7 +248,7 @@ def plot_modulation_compare(stats_bpsk, stats_qpsk, out_png: Path, smooth: bool 
             sns.lineplot(
                 x=xs,
                 y=np.maximum(ys, 0),
-                linewidth=2.4,
+                linewidth=1.5,
                 linestyle=c["linestyle"],
                 label=f'{c["label"]} (smooth)',
                 ax=axes[1],
@@ -258,7 +258,7 @@ def plot_modulation_compare(stats_bpsk, stats_qpsk, out_png: Path, smooth: bool 
                 x=x[m],
                 y=np.maximum(ber[m], 0),
                 marker="o",
-                linewidth=2.0,
+                linewidth=1.2,
                 linestyle=c["linestyle"],
                 label=c["label"],
                 ax=axes[1],
@@ -296,7 +296,7 @@ def plot_modulation_compare_groups(groups, out_png: Path, smooth: bool = True):
             sns.lineplot(
                 x=xs,
                 y=np.clip(ys, 0, 1),
-                linewidth=2.0,
+                linewidth=1.2,
                 linestyle=c["linestyle"],
                 label=f'{c["label"]} (smooth)',
                 ax=axes[0],
@@ -306,7 +306,7 @@ def plot_modulation_compare_groups(groups, out_png: Path, smooth: bool = True):
                 x=x,
                 y=per,
                 marker="o",
-                linewidth=1.8,
+                linewidth=1.1,
                 linestyle=c["linestyle"],
                 label=c["label"],
                 ax=axes[0],
@@ -332,7 +332,7 @@ def plot_modulation_compare_groups(groups, out_png: Path, smooth: bool = True):
             sns.lineplot(
                 x=xs,
                 y=np.maximum(ys, 0),
-                linewidth=2.0,
+                linewidth=1.2,
                 linestyle=c["linestyle"],
                 label=f'{c["label"]} (smooth)',
                 ax=axes[1],
@@ -342,7 +342,7 @@ def plot_modulation_compare_groups(groups, out_png: Path, smooth: bool = True):
                 x=x[m],
                 y=np.maximum(ber[m], 0),
                 marker="o",
-                linewidth=1.8,
+                linewidth=1.1,
                 linestyle=c["linestyle"],
                 label=c["label"],
                 ax=axes[1],

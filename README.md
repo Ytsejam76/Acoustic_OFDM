@@ -85,6 +85,12 @@ octave --quiet run_ber_snr_plot.m --mod both --echo all
 
 # Custom output filename (default is ber_per_snr.png)
 octave --quiet run_ber_snr_plot.m --mod both --echo all --output my_experiment.png
+
+# Include oracle curves (optional; default is estimated sync only)
+octave --quiet run_ber_snr_plot.m --mod both --with-oracle
+
+# Show script help
+octave --quiet run_ber_snr_plot.m --help
 ```
 
 The script calls `./.venv/bin/python3 plot_snr_sweep_seaborn.py` for final rendering, so set up the venv first.
@@ -101,6 +107,17 @@ Generated files are written to `images/`:
 
 - For any run mode, the final output plot is: `ber_per_snr.png`
 - You can override the filename with `--output FILENAME.png`.
+- Oracle curves are disabled by default; enable them with `--with-oracle`.
+- Constellation comparison is saved as a single image:
+  - `constellation_compare.png`
+  - For `--mod both --echo all`, layout is `3x2`:
+    - rows: `none`, `room_mild`, `cp_mix`
+    - columns: `BPSK`, `QPSK`
+  - Each panel overlays pre-EQ, post-EQ, and ideal points with legend.
+- Time-domain overlays are consolidated into one image per modulation:
+  - `time_domain_compare_bpsk.png`
+  - `time_domain_compare_qpsk.png`
+  - Each image contains one subplot per channel model and overlays TX/RX with legend.
 
 ## Current modem design (short-burst)
 

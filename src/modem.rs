@@ -421,18 +421,14 @@ fn known_pilot_symbols(n: usize, sym_idx: usize) -> Vec<Complex32> {
 /// Returns:
 /// - `(Vec<usize>, Vec<usize>, Vec<usize>)`: `(used_bins, pilot_bins, data_bins)`.
 fn ofdm_bin_plan(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-    let used_bins = cfg.used_bins.clone();
+    let (used_bins, pilot_candidates) = resolve_bins_with_base_freq(cfg);
     let pilots_on = cfg.use_pilots.unwrap_or(matches!(cfg.modulation, Modulation::Qpsk));
     let pilot_bins = if pilots_on {
-        let mut pilots = if cfg.pilot_bins.is_empty() {
-            used_bins.clone()
-        } else {
-            cfg.pilot_bins
-                .iter()
-                .copied()
-                .filter(|b| used_bins.contains(b))
-                .collect::<Vec<_>>()
-        };
+        let mut pilots = pilot_candidates
+            .iter()
+            .copied()
+            .filter(|b| used_bins.contains(b))
+            .collect::<Vec<_>>();
         if let Some(n) = cfg.num_pilots {
             pilots.truncate(n.min(pilots.len()));
         }
@@ -446,6 +442,45 @@ fn ofdm_bin_plan(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
         .filter(|b| !pilot_bins.contains(b))
         .collect::<Vec<_>>();
     (used_bins, pilot_bins, data_bins)
+}
+
+fn dedup_stable(v: Vec<usize>) -> Vec<usize> {
+    let mut out = Vec::with_capacity(v.len());
+    for x in v {
+        if !out.contains(&x) {
+            out.push(x);
+        }
+    }
+    out
+}
+
+fn resolve_bins_with_base_freq(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>) {
+    let mut used_bins = cfg.used_bins.clone();
+    let mut pilot_candidates = if cfg.pilot_bins.is_empty() {
+        used_bins.clone()
+    } else {
+        cfg.pilot_bins.clone()
+    };
+
+    if let Some(base_hz) = cfg.base_freq_hz {
+        let df = cfg.fs / (cfg.nfft as f32);
+        if df > 0.0 && !used_bins.is_empty() {
+            let target_bin = (base_hz / df).round() as isize;
+            let current_min = *used_bins.iter().min().unwrap_or(&1) as isize;
+            let shift = target_bin.max(1) - current_min;
+            let kmax = (cfg.nfft / 2).saturating_sub(1) as isize;
+            used_bins = used_bins
+                .iter()
+                .map(|&b| ((b as isize + shift).clamp(1, kmax)) as usize)
+                .collect();
+            pilot_candidates = pilot_candidates
+                .iter()
+                .map(|&b| ((b as isize + shift).clamp(1, kmax)) as usize)
+                .collect();
+        }
+    }
+
+    (dedup_stable(used_bins), dedup_stable(pilot_candidates))
 }
 
 /// Returns one half of the repeated sync preamble.
@@ -747,6 +782,17 @@ mod tests {
         let (_used, pilots, data) = ofdm_bin_plan(&cfg);
         assert_eq!(pilots, vec![2, 4]);
         assert_eq!(data, vec![3, 5]);
+    }
+
+    #[test]
+    /// Verifies active bins shift when base frequency is configured.
+    fn base_frequency_shifts_bins() {
+        let mut cfg = OfdmConfig::default();
+        cfg.base_freq_hz = Some(2_000.0);
+        let (used, pilots, data) = ofdm_bin_plan(&cfg);
+        assert_eq!(used, vec![4, 5, 6, 7]);
+        assert!(pilots.is_empty());
+        assert_eq!(data, vec![4, 5, 6, 7]);
     }
 }
 

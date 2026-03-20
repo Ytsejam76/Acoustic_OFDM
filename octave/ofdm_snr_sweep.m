@@ -318,6 +318,7 @@ function p = default_base_params()
     p.Ncp = 72;
     p.used_bins = [2 3 4 5];
     p.pilot_bins = [2 4];
+    p.base_freq_hz = [];
     p.num_pilots = [];
     p.modulation = 'BPSK';
     p.use_pilots = [];

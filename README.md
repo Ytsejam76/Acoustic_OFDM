@@ -49,6 +49,12 @@ Roundtrip (encode + decode):
 cargo run -p acoustic_ofdm_cli -- roundtrip /tmp/ofdm.wav "hello-ofdm"
 ```
 
+Roundtrip with custom OFDM base subcarrier frequency:
+
+```bash
+cargo run -p acoustic_ofdm_cli -- roundtrip --base-freq-hz 2000 /tmp/ofdm.wav "hello-ofdm"
+```
+
 ### Octave
 
 Run a channel test:
@@ -61,6 +67,12 @@ Run BER/PER sweep plot script:
 
 ```bash
 octave --quiet run_ber_snr_plot.m
+```
+
+Tune OFDM base subcarrier frequency (example: 2 kHz):
+
+```bash
+octave --quiet --eval "p=struct(); p.base_freq_hz=2000; p.pause_before_exit=false; ofdm_test_channel(p);"
 ```
 
 ### Generate BPSK/QPSK plots
@@ -127,6 +139,7 @@ Generated files are written to `images/`:
 - training OFDM symbol for channel estimation
 - BPSK and QPSK
 - passband around ~17 kHz in current setup
+- tunable OFDM base subcarrier frequency (`base_freq_hz`) in both Octave and Rust config
 
 ## Historical note
 

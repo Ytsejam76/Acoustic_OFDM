@@ -122,6 +122,7 @@ function p = default_params()
     p.Ncp = 72;
     p.used_bins = [2 3 4 5];
     p.pilot_bins = [2 4];
+    p.base_freq_hz = [];
     p.num_pilots = [];
     p.modulation = 'BPSK';
     p.use_pilots = [];
@@ -138,23 +139,38 @@ function p = default_params()
 end
 
 function [data_bins, pilot_bins, used_bins] = ofdm_bin_plan(p)
-    used_bins = p.used_bins(:).';
-    pilot_bins = select_pilot_bins(p, used_bins);
+    [used_bins, pilot_candidates] = resolve_bins_with_base_freq(p);
+    pilot_bins = select_pilot_bins(p, used_bins, pilot_candidates);
     data_bins = setdiff(used_bins, pilot_bins, 'stable');
 end
 
-function pilot_bins = select_pilot_bins(p, used_bins)
+function [used_bins, pilot_candidates] = resolve_bins_with_base_freq(p)
+    used_bins = p.used_bins(:).';
+    if isfield(p, 'pilot_bins') && ~isempty(p.pilot_bins)
+        pilot_candidates = p.pilot_bins(:).';
+    else
+        pilot_candidates = used_bins;
+    end
+
+    if isfield(p, 'base_freq_hz') && ~isempty(p.base_freq_hz)
+        df = p.fs / p.Nfft;
+        target_bin = max(1, round(double(p.base_freq_hz) / df));
+        shift = target_bin - min(used_bins);
+        used_bins = used_bins + shift;
+        pilot_candidates = pilot_candidates + shift;
+    end
+
+    kmax = floor(p.Nfft / 2) - 1;
+    used_bins = unique(max(1, min(kmax, used_bins)), 'stable');
+    pilot_candidates = unique(max(1, min(kmax, pilot_candidates)), 'stable');
+end
+
+function pilot_bins = select_pilot_bins(p, used_bins, pilot_candidates)
     pilot_bins = [];
     if ~pilots_enabled(p)
         return;
     end
-
-    if isfield(p, 'pilot_bins') && ~isempty(p.pilot_bins)
-        candidates = p.pilot_bins(:).';
-    else
-        candidates = used_bins;
-    end
-    pilot_bins = intersect(used_bins, candidates, 'stable');
+    pilot_bins = intersect(used_bins, pilot_candidates, 'stable');
 
     np = requested_num_pilots(p);
     if ~isempty(np)

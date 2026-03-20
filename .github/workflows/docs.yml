@@ -32,7 +32,7 @@ jobs:
 
       - name: Setup Pages Metadata
         run: |
-          CRATE_NAME=$(grep -m 1 '^name' Cargo.toml | cut -d '"' -f 2 | tr '-' '_')
+          CRATE_NAME=$(grep -m 1 '^name' lib/Cargo.toml | cut -d '"' -f 2 | tr '-' '_')
           echo "<meta http-equiv=\"refresh\" content=\"0; url=$CRATE_NAME/index.html\">" > target/doc/index.html
           touch target/doc/.nojekyll
 

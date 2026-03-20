@@ -23,7 +23,7 @@ The original production target was mobile code (Java on Android, Objective-C on 
 ## Repository layout
 
 - `octave/`: Octave modem, channel simulation, sweeps, plotting scripts
-- `src/`: Rust library (`acoustic_ofdm`)
+- `lib/`: Rust library crate (`acoustic_ofdm`)
 - `cli/`: Rust CLI crate (`acoustic_ofdm_cli`)
 - `images/`: generated plots and figures
 
@@ -37,10 +37,22 @@ Encode payload to WAV:
 cargo run -p acoustic_ofdm_cli -- encode /tmp/ofdm.wav "hello-ofdm"
 ```
 
+Encode payload from stdin to WAV:
+
+```bash
+printf "hello-ofdm" | cargo run -p acoustic_ofdm_cli -- encode /tmp/ofdm.wav -
+```
+
 Decode payload from WAV:
 
 ```bash
 cargo run -p acoustic_ofdm_cli -- decode /tmp/ofdm.wav
+```
+
+Decode payload from WAV to stdout (raw bytes):
+
+```bash
+cargo run -p acoustic_ofdm_cli -- decode --stdout /tmp/ofdm.wav
 ```
 
 Roundtrip (encode + decode):
@@ -49,11 +61,46 @@ Roundtrip (encode + decode):
 cargo run -p acoustic_ofdm_cli -- roundtrip /tmp/ofdm.wav "hello-ofdm"
 ```
 
+Roundtrip using stdin payload and stdout decoded bytes:
+
+```bash
+printf "hello-ofdm" | cargo run -p acoustic_ofdm_cli -- roundtrip --stdout /tmp/ofdm.wav -
+```
+
 Roundtrip with custom OFDM base subcarrier frequency:
 
 ```bash
 cargo run -p acoustic_ofdm_cli -- roundtrip --base-freq-hz 2000 /tmp/ofdm.wav "hello-ofdm"
 ```
+
+Encode/decode self-test loop with randomized channel realizations:
+
+```bash
+cargo run -p acoustic_ofdm_cli -- codec-loop --iterations 100 --snr-db 26 --echo 0.8:0.15 "hello-ofdm"
+```
+
+Add random echoes per iteration:
+
+```bash
+cargo run -p acoustic_ofdm_cli -- codec-loop --iterations 50 \
+  --snr-db 28 --rand-echo-count 1 --rand-echo-max-ms 1.5 \
+  --rand-echo-gain-min 0.03 --rand-echo-gain-max 0.10 \
+  "hello-ofdm"
+```
+
+Over-the-air modem test (`tx` sends encoded packet, `rx` listens and decodes):
+
+```bash
+# terminal 1
+cargo run -p acoustic_ofdm_cli -- rx --duration-sec 6 --verbose
+
+# terminal 2
+cargo run -p acoustic_ofdm_cli -- tx --spk-gain 0.8 "hello-ofdm"
+```
+
+Note: this binary uses `cpal`, which on Linux typically runs through ALSA
+or JACK backends and works well with PipeWire setups that provide ALSA/JACK
+compatibility layers.
 
 ### Octave
 

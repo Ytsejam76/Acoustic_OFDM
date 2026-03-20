@@ -1,19 +1,7 @@
 # Copyright (c) 2026 Elias S. G. Carotti
 
-[package]
-name = "acoustic_ofdm"
-version = "0.1.0"
-edition = "2021"
-
 [workspace]
-members = [".", "cli"]
+members = ["lib", "cli"]
 resolver = "2"
-
-[lib]
-path = "src/lib.rs"
-
-[dependencies]
-rustfft = "6"
-hound = "3"
 
 # vim: set ts=4 sw=4 et:

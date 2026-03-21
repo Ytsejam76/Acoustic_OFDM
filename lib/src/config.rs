@@ -34,6 +34,47 @@ impl Modulation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WakePreamble {
+    Tone,
+    Chirp,
+    Pn,
+    Gold,
+}
+
+impl WakePreamble {
+    /// Parses a wake preamble mode from CLI/config text.
+    ///
+    /// Parameters:
+    /// - `s`: mode string.
+    /// Returns:
+    /// - `Option<WakePreamble>`: parsed mode when recognized.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "tone" => Some(Self::Tone),
+            "chirp" => Some(Self::Chirp),
+            "pn" => Some(Self::Pn),
+            "gold" => Some(Self::Gold),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical mode name.
+    ///
+    /// Parameters:
+    /// - `self`: wake preamble variant.
+    /// Returns:
+    /// - `&'static str`: printable mode name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tone => "tone",
+            Self::Chirp => "chirp",
+            Self::Pn => "pn",
+            Self::Gold => "gold",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OfdmConfig {
     pub fs: f32,
@@ -49,7 +90,7 @@ pub struct OfdmConfig {
     pub wake_ms: f32,
     pub wake_freq: f32,
     pub wake_guard_ms: f32,
-    pub use_chirp_sync: bool,
+    pub wake_preamble: WakePreamble,
     pub sync_chirp_f0: f32,
     pub sync_chirp_f1: f32,
     pub sync_half_len: usize,
@@ -76,10 +117,10 @@ impl Default for OfdmConfig {
             num_pilots: None,
             use_pilots: None,
             modulation: Modulation::Bpsk,
-            wake_ms: 12.0,
+            wake_ms: 100.0,
             wake_freq: 16_500.0,
             wake_guard_ms: 4.0,
-            use_chirp_sync: true,
+            wake_preamble: WakePreamble::Gold,
             sync_chirp_f0: 4_000.0,
             sync_chirp_f1: 8_000.0,
             sync_half_len: 6_000,

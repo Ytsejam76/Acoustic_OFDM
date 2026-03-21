@@ -12,6 +12,7 @@ use acoustic_ofdm::{
     load_wav_mono_f32,
     save_wav_mono_i16,
     OfdmConfig,
+    WakePreamble,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
@@ -63,9 +64,10 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("      [--rand-echo-gain-min G] [--rand-echo-gain-max G] [--seed N]");
     eprintln!("      [--no-channel] <payload_text|stdin>");
     eprintln!("  acoustic_ofdm_cli tx [--base-freq-hz HZ] [--spk-gain GAIN] [--pre-delay-sec SEC]");
-    eprintln!("      [--repeats N] [--gap-sec SEC] [--verbose] <payload_text|stdin>");
+    eprintln!("      [--repeats N] [--gap-sec SEC] [--wake-preamble MODE] [--verbose] <payload_text|stdin>");
     eprintln!("  acoustic_ofdm_cli rx [--base-freq-hz HZ] [--duration-sec SEC] [--mic-gain GAIN]");
-    eprintln!("      [--in-hp-hz HZ] [--in-lp-hz HZ] [--no-input-filter] [--stdout] [--verbose]");
+    eprintln!("      [--in-hp-hz HZ] [--in-lp-hz HZ] [--no-input-filter] [--wake-preamble MODE]");
+    eprintln!("      [--dump-wav PATH] [--stdout] [--verbose]");
     eprintln!();
     eprintln!("Common options:");
     eprintln!("  --base-freq-hz HZ   OFDM base subcarrier frequency in Hz (encode/decode/roundtrip).");
@@ -88,9 +90,11 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  --pre-delay-sec SEC Wait before first TX burst (default: 0.2).");
     eprintln!("  --repeats N         Number of repeated TX bursts (default: 3).");
     eprintln!("  --gap-sec SEC       Silence gap between TX bursts (default: 0.35).");
-    eprintln!("  --in-hp-hz HZ       RX high-pass cutoff in Hz (default: 250).");
+    eprintln!("  --wake-preamble MODE Wake preamble mode: gold|pn|chirp|tone (default: gold).");
+    eprintln!("  --in-hp-hz HZ       RX high-pass cutoff in Hz (default: 12000).");
     eprintln!("  --in-lp-hz HZ       RX low-pass cutoff in Hz (default: 19000).");
     eprintln!("  --no-input-filter   Disable RX input filtering.");
+    eprintln!("  --dump-wav PATH     Save captured RX audio to a mono WAV file.");
     eprintln!("  --verbose           Print extra diagnostics (especially for rx).");
     eprintln!();
     eprintln!("Examples:");
@@ -101,8 +105,8 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  acoustic_ofdm_cli codec-loop --iterations 50 --snr-db 16 \"hello\"");
     eprintln!("  acoustic_ofdm_cli codec-loop --echo 1.0:0.4 --echo 2.2:0.2 \"hello\"");
     eprintln!("  acoustic_ofdm_cli codec-loop --rand-echo-count 3 --rand-echo-max-ms 2.5 \"hello\"");
-    eprintln!("  acoustic_ofdm_cli tx --spk-gain 0.8 --repeats 4 \"hello\"");
-    eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --verbose");
+    eprintln!("  acoustic_ofdm_cli tx --spk-gain 0.8 --repeats 2 --wake-preamble gold \"hello\"");
+    eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --wake-preamble gold --dump-wav /tmp/rx.wav --verbose");
     std::process::exit(code);
 }
 
@@ -123,6 +127,7 @@ struct AudioOpts {
     input_filter: bool,
     input_hp_hz: f32,
     input_lp_hz: f32,
+    dump_wav: Option<String>,
     verbose: bool,
 }
 
@@ -188,6 +193,14 @@ fn apply_cli_overrides(
                 stdout_raw = true;
                 i += 1;
             }
+            "--wake-preamble" => {
+                if i + 1 >= args.len() {
+                    return Err("--wake-preamble requires a value".into());
+                }
+                cfg.wake_preamble = WakePreamble::parse(&args[i + 1])
+                    .ok_or("wake preamble must be one of: gold, pn, chirp, tone")?;
+                i += 2;
+            }
             s if s.starts_with("--") => {
                 return Err(format!("unknown option: {s}").into());
             }
@@ -198,6 +211,27 @@ fn apply_cli_overrides(
         }
     }
     Ok((pos, stdout_raw))
+}
+
+/// Parses and applies a wake preamble mode.
+///
+/// Parameters:
+/// - `cfg`: modem configuration to mutate.
+/// - `args`: full argument vector.
+/// - `i`: current option index.
+/// Returns:
+/// - `Result<usize, Box<dyn Error>>`: next argument index after the option.
+fn parse_wake_preamble_opt(
+    cfg: &mut OfdmConfig,
+    args: &[String],
+    i: usize,
+) -> Result<usize, Box<dyn Error>> {
+    if i + 1 >= args.len() {
+        return Err("--wake-preamble requires a value".into());
+    }
+    cfg.wake_preamble = WakePreamble::parse(&args[i + 1])
+        .ok_or("wake preamble must be one of: gold, pn, chirp, tone")?;
+    Ok(i + 2)
 }
 
 /// Parses options for the `tx` command.
@@ -220,8 +254,9 @@ fn parse_tx_args(
         repeats: 3,
         gap_sec: 0.35,
         input_filter: true,
-        input_hp_hz: 250.0,
+        input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
+        dump_wav: None,
         verbose: false,
     };
     let mut payload_arg: Option<String> = None;
@@ -239,6 +274,9 @@ fn parse_tx_args(
                 }
                 cfg.base_freq_hz = Some(hz);
                 i += 2;
+            }
+            "--wake-preamble" => {
+                i = parse_wake_preamble_opt(cfg, args, i)?;
             }
             "--mic-gain" => {
                 if i + 1 >= args.len() {
@@ -325,8 +363,9 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
         repeats: 3,
         gap_sec: 0.35,
         input_filter: true,
-        input_hp_hz: 250.0,
+        input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
+        dump_wav: None,
         verbose: false,
     };
     let mut stdout_raw = false;
@@ -344,6 +383,9 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
                 }
                 cfg.base_freq_hz = Some(hz);
                 i += 2;
+            }
+            "--wake-preamble" => {
+                i = parse_wake_preamble_opt(cfg, args, i)?;
             }
             "--stdout" => {
                 stdout_raw = true;
@@ -380,6 +422,13 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
             "--no-input-filter" => {
                 opts.input_filter = false;
                 i += 1;
+            }
+            "--dump-wav" => {
+                if i + 1 >= args.len() {
+                    return Err("--dump-wav requires a value".into());
+                }
+                opts.dump_wav = Some(args[i + 1].clone());
+                i += 2;
             }
             "--verbose" => {
                 opts.verbose = true;
@@ -435,6 +484,9 @@ fn parse_codec_loop_args(
                 }
                 cfg.base_freq_hz = Some(hz);
                 i += 2;
+            }
+            "--wake-preamble" => {
+                i = parse_wake_preamble_opt(cfg, args, i)?;
             }
             "--iterations" => {
                 if i + 1 >= args.len() {
@@ -1008,6 +1060,7 @@ fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<
 
     println!("Output device: {}", out_dev.name()?);
     println!("Stream config: {} Hz, out {:?}", out_cfg.sample_rate().0, out_cfg.sample_format());
+    println!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
     println!("Transmit samples: {}", tx.len());
     if opts.verbose {
         let tx_dur = (tx.len() as f32) / cfg_rt.fs;
@@ -1058,6 +1111,20 @@ fn signal_diag(x: &[f32]) -> (f32, f32, usize) {
     (rms, peak, first)
 }
 
+/// Estimates clipping severity in a captured waveform.
+///
+/// Parameters:
+/// - `x`: input waveform.
+/// Returns:
+/// - `(usize, f32)`: number of near-full-scale samples and their fraction.
+fn clipping_diag(x: &[f32]) -> (usize, f32) {
+    if x.is_empty() {
+        return (0, 0.0);
+    }
+    let clipped = x.iter().filter(|&&s| s.abs() >= 0.995).count();
+    (clipped, (clipped as f32) / (x.len() as f32))
+}
+
 /// Filters input samples for sync detection only.
 ///
 /// Parameters:
@@ -1090,6 +1157,47 @@ fn filter_for_sync_detection(
     y
 }
 
+/// Generates a deterministic bipolar PN sequence.
+///
+/// Parameters:
+/// - `n`: number of chips.
+/// Returns:
+/// - `Vec<f32>`: PN chips in `{-1, +1}`.
+fn pn_sequence(n: usize) -> Vec<f32> {
+    let mut state: u16 = 0x01FF;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let bit = (state & 1) as u8;
+        out.push(if bit == 0 { -1.0 } else { 1.0 });
+        let fb = ((state >> 8) ^ (state >> 4)) & 1;
+        state = (state >> 1) | (fb << 8);
+    }
+    out
+}
+
+/// Generates a deterministic bipolar Gold-like sequence.
+///
+/// Parameters:
+/// - `n`: number of chips.
+/// Returns:
+/// - `Vec<f32>`: Gold chips in `{-1, +1}`.
+fn gold_sequence(n: usize) -> Vec<f32> {
+    let mut s1: u16 = 0x01FF;
+    let mut s2: u16 = 0x0155;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let b1 = (s1 & 1) as u8;
+        let b2 = (s2 & 1) as u8;
+        out.push(if (b1 ^ b2) == 0 { -1.0 } else { 1.0 });
+
+        let fb1 = ((s1 >> 8) ^ (s1 >> 4)) & 1;
+        let fb2 = ((s2 >> 8) ^ (s2 >> 7) ^ (s2 >> 4) ^ (s2 >> 1)) & 1;
+        s1 = (s1 >> 1) | (fb1 << 8);
+        s2 = (s2 >> 1) | (fb2 << 8);
+    }
+    out
+}
+
 /// Builds the wake preamble reference used by passband packets.
 ///
 /// Parameters:
@@ -1099,15 +1207,26 @@ fn filter_for_sync_detection(
 fn make_wake_ref(cfg: &OfdmConfig) -> Vec<f32> {
     let n = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let ramp = ((0.001 * cfg.fs) as usize).min(n / 4);
+    let pn = pn_sequence(n);
+    let gold = gold_sequence(n);
     let mut out = vec![0.0f32; n];
     for i in 0..n {
         let t = i as f32 / cfg.fs;
-        let w = if cfg.use_chirp_sync {
-            let tmax = ((n - 1) as f32 / cfg.fs).max(1.0 / cfg.fs);
-            let k = (cfg.sync_chirp_f1 - cfg.sync_chirp_f0) / tmax;
-            (2.0 * std::f32::consts::PI * (cfg.sync_chirp_f0 * t + 0.5 * k * t * t)).sin()
-        } else {
-            (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin()
+        let w = match cfg.wake_preamble {
+            WakePreamble::Tone => (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin(),
+            WakePreamble::Chirp => {
+                let tmax = ((n - 1) as f32 / cfg.fs).max(1.0 / cfg.fs);
+                let k = (cfg.sync_chirp_f1 - cfg.sync_chirp_f0) / tmax;
+                (2.0 * std::f32::consts::PI * (cfg.sync_chirp_f0 * t + 0.5 * k * t * t)).sin()
+            }
+            WakePreamble::Pn => {
+                let chip = pn[i];
+                chip * (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin()
+            }
+            WakePreamble::Gold => {
+                let chip = gold[i];
+                chip * (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin()
+            }
         };
         let env = if ramp > 1 && i < ramp {
             i as f32 / ramp as f32
@@ -1128,9 +1247,16 @@ fn make_wake_ref(cfg: &OfdmConfig) -> Vec<f32> {
 /// - `wake`: wake reference samples.
 /// - `step`: search step in samples.
 /// - `top_k`: number of candidates returned.
+/// - `packet_len`: expected packet length in samples after wake start.
 /// Returns:
 /// - `Vec<(usize, f32)>`: `(start_index, score)` sorted by descending score.
-fn wake_candidates(rx: &[f32], wake: &[f32], step: usize, top_k: usize) -> Vec<(usize, f32)> {
+fn wake_candidates(
+    rx: &[f32],
+    wake: &[f32],
+    step: usize,
+    top_k: usize,
+    packet_len: usize,
+) -> Vec<(usize, f32)> {
     if rx.len() < wake.len() || wake.is_empty() || step == 0 || top_k == 0 {
         return Vec::new();
     }
@@ -1141,7 +1267,7 @@ fn wake_candidates(rx: &[f32], wake: &[f32], step: usize, top_k: usize) -> Vec<(
         pref[i + 1] = pref[i] + x * x;
     }
     let w_energy = wake.iter().map(|v| v * v).sum::<f32>().max(1e-12);
-    let mut cands: Vec<(usize, f32)> = Vec::new();
+    let mut scored: Vec<(usize, f32)> = Vec::new();
     let min_sep = (m / 2).max(1);
     let last = n - m;
     for i in (0..=last).step_by(step) {
@@ -1150,20 +1276,23 @@ fn wake_candidates(rx: &[f32], wake: &[f32], step: usize, top_k: usize) -> Vec<(
         for k in 0..m {
             dot += rx[i + k] * wake[k];
         }
-        let score = dot.abs() / (e.sqrt() * w_energy.sqrt());
-        if cands.len() < top_k {
-            cands.push((i, score));
-            cands.sort_by(|a, b| b.1.total_cmp(&a.1));
-            continue;
-        }
-        if score > cands[cands.len() - 1].1 {
-            let last_idx = cands.len() - 1;
-            cands[last_idx] = (i, score);
-            cands.sort_by(|a, b| b.1.total_cmp(&a.1));
-        }
+        let corr = dot.abs() / (e.sqrt() * w_energy.sqrt());
+
+        let pkt_end = i.saturating_add(packet_len).min(n);
+        let post_e = (pref[pkt_end] - pref[i + m]).max(1e-12);
+        let post_len = pkt_end.saturating_sub(i + m).max(1);
+        let post_rms = (post_e / (post_len as f32)).sqrt();
+        let wake_rms = (e / (m as f32)).sqrt();
+        let energy_ratio = (post_rms / wake_rms.max(1e-6)).clamp(0.0, 4.0);
+
+        // Favor candidates followed by sustained packet energy.
+        let time_bias = 1.0 - 0.15 * ((i as f32) / (n as f32));
+        let score = corr * (0.35 + 0.65 * energy_ratio) * time_bias.max(0.5);
+        scored.push((i, score));
     }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut filtered: Vec<(usize, f32)> = Vec::new();
-    for (idx, sc) in cands {
+    for (idx, sc) in scored {
         if filtered.iter().any(|(j, _)| idx.abs_diff(*j) < min_sep) {
             continue;
         }
@@ -1213,7 +1342,7 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
     }
     let wake = make_wake_ref(cfg);
     let step = ((cfg.fs * 0.001).round() as usize).max(1);
-    let cands = wake_candidates(rx_sync, &wake, step, 6);
+    let cands = wake_candidates(rx_sync, &wake, step, 6, est_pkt);
     for (idx, _) in cands.iter().take(4) {
         let off = *idx;
         let end = off.saturating_add(est_pkt + pad).min(rx_raw.len());
@@ -1279,6 +1408,7 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     println!("Input device : {}", in_dev.name()?);
     println!("Stream config: {} Hz, in {:?}", in_cfg.sample_rate().0, in_cfg.sample_format());
     println!("RX detector: wake-correlation-v2");
+    println!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
     println!(
         "RX sync filter: {} (hp={:.1}Hz, lp={:.1}Hz)",
         if opts.input_filter { "on" } else { "off" },
@@ -1336,6 +1466,10 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         rx.push(s);
     }
     println!("Captured samples: {}", rx.len());
+    if let Some(path) = &opts.dump_wav {
+        save_wav_mono_i16(Path::new(path), &rx, cfg_rt.fs.round() as u32)?;
+        println!("Saved RX capture: {}", path);
+    }
     let rx_sync = filter_for_sync_detection(
         &rx,
         cfg_rt.fs,
@@ -1344,6 +1478,7 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         opts.input_filter,
     );
     let (rms, peak, first_loud) = signal_diag(&rx);
+    let (clipped, clipped_frac) = clipping_diag(&rx);
     if opts.verbose {
         println!(
             "RX diagnostics: rms={:.5} peak={:.5} first_loud_sample={} ({:.3}s)",
@@ -1352,8 +1487,18 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
             first_loud,
             (first_loud as f32) / cfg_rt.fs
         );
+        println!(
+            "RX clipping: {} samples ({:.2}%) at |x| >= 0.995",
+            clipped,
+            100.0 * clipped_frac
+        );
         if peak < 0.01 {
             println!("RX warning: very low capture level; increase speaker volume or mic gain.");
+        }
+        if clipped_frac >= 0.001 {
+            println!("RX warning: capture is clipping; reduce speaker volume, mic gain, or disable AGC.");
+        } else if clipped_frac >= 0.0001 {
+            println!("RX warning: capture is close to clipping.");
         }
     }
 
@@ -1375,7 +1520,7 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     if dec.is_none() {
         let wake = make_wake_ref(&cfg_rt);
         let coarse_step = ((cfg_rt.fs * 0.0005).round() as usize).max(1);
-        let cands = wake_candidates(&rx_sync, &wake, coarse_step, 12);
+        let cands = wake_candidates(&rx_sync, &wake, coarse_step, 12, est_pkt);
         if opts.verbose {
             println!(
                 "Wake search: {} candidates (step={} samples)",
@@ -1660,7 +1805,7 @@ mod tests {
     use super::{
         apply_cli_overrides, parse_codec_loop_args, parse_rx_args, parse_tx_args, payload_from_arg,
     };
-    use acoustic_ofdm::OfdmConfig;
+    use acoustic_ofdm::{OfdmConfig, WakePreamble};
 
     /// Ensures payload parser keeps UTF-8 bytes exactly.
     ///
@@ -1694,6 +1839,26 @@ mod tests {
         assert!(!stdout_raw);
     }
 
+    /// Ensures wake preamble override is parsed as a common option.
+    ///
+    /// Parameters:
+    /// - none.
+    /// Returns:
+    /// - none.
+    #[test]
+    fn parse_wake_preamble_override() {
+        let mut cfg = OfdmConfig::default();
+        let args = vec![
+            "--wake-preamble".to_string(),
+            "gold".to_string(),
+            "in.wav".to_string(),
+        ];
+        let (pos, stdout_raw) = apply_cli_overrides(&mut cfg, &args).expect("parse failed");
+        assert_eq!(pos, vec!["in.wav".to_string()]);
+        assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
+        assert!(!stdout_raw);
+    }
+
     /// Ensures stdout flag is parsed as a common option.
     ///
     /// Parameters:
@@ -1723,11 +1888,17 @@ mod tests {
             "2.5".to_string(),
             "--mic-gain".to_string(),
             "0.8".to_string(),
+            "--wake-preamble".to_string(),
+            "tone".to_string(),
+            "--dump-wav".to_string(),
+            "/tmp/rx.wav".to_string(),
             "--verbose".to_string(),
         ];
         let (o, stdout_raw) = parse_rx_args(&mut cfg, &args).expect("parse failed");
         assert!((o.duration_sec - 2.5).abs() < 1e-6);
         assert!((o.mic_gain - 0.8).abs() < 1e-6);
+        assert_eq!(o.dump_wav.as_deref(), Some("/tmp/rx.wav"));
+        assert_eq!(cfg.wake_preamble, WakePreamble::Tone);
         assert!(o.verbose);
         assert!(!stdout_raw);
     }
@@ -1746,12 +1917,15 @@ mod tests {
             "0.7".to_string(),
             "--repeats".to_string(),
             "4".to_string(),
+            "--wake-preamble".to_string(),
+            "gold".to_string(),
             "--verbose".to_string(),
             "hello".to_string(),
         ];
         let (o, payload) = parse_tx_args(&mut cfg, &args).expect("parse failed");
         assert!((o.spk_gain - 0.7).abs() < 1e-6);
         assert_eq!(o.repeats, 4);
+        assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
         assert!(o.verbose);
         assert_eq!(payload, b"hello");
     }

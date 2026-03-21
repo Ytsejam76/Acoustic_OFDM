@@ -6,7 +6,7 @@ pub mod packet;
 pub mod modem;
 pub mod wav_io;
 
-pub use config::{Modulation, OfdmConfig};
+pub use config::{Modulation, OfdmConfig, WakePreamble};
 pub use modem::{
     decode_encoded_burst_oracle,
     decode_packet_baseband,

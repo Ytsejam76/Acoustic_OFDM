@@ -2,7 +2,7 @@
 
 use rustfft::{num_complex::Complex32, FftPlanner};
 
-use crate::config::{Modulation, OfdmConfig};
+use crate::config::{Modulation, OfdmConfig, WakePreamble};
 use crate::packet::{bits_to_bytes, build_packet_bytes, bytes_to_bits, modulation_from_id, parse_packet_bytes, split_payload, PacketInfo};
 
 #[derive(Clone, Debug)]
@@ -151,7 +151,7 @@ fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> 
     payload_syms.resize(n_data * syms_per_ofdm, Complex32::new(0.0, 0.0));
 
     let mut xbb = Vec::<Complex32>::new();
-    let sync_half = known_sync_half(cfg.sync_half_len);
+    let sync_half = known_sync_half(cfg);
     xbb.extend_from_slice(&sync_half);
     xbb.extend_from_slice(&sync_half);
 
@@ -329,18 +329,22 @@ fn find_repeated_half_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig) -> usize 
         pref_e[n + 1] = pref_e[n] + e;
     }
 
-    let mut best_d = 0usize;
+    let mut metrics = vec![0.0f32; max_search + 1];
     let mut best_m = -1.0f32;
     for d in 0..=max_search {
         let p = pref_v[d + l] - pref_v[d];
         let r = (pref_e[d + l] - pref_e[d]).max(1e-9);
         let m = p.norm_sqr() / (r * r);
+        metrics[d] = m;
         if m > best_m {
             best_m = m;
-            best_d = d;
         }
     }
-    best_d
+    let thresh = 0.97 * best_m.max(0.0);
+    metrics
+        .iter()
+        .position(|&m| m >= thresh)
+        .unwrap_or(0)
 }
 
 /// Applies coarse CFO correction from the repeated-half sync preamble.
@@ -555,16 +559,36 @@ fn resolve_bins_with_base_freq(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>) {
 /// Returns one half of the repeated sync preamble.
 ///
 /// Parameters:
-/// - `l`: half-preamble length in samples.
+/// - `cfg`: modem configuration.
 /// Returns:
 /// - `Vec<Complex32>`: sync half sequence.
-fn known_sync_half(l: usize) -> Vec<Complex32> {
-    (0..l)
-        .map(|idx| {
-            let m = (3 * idx + 1) % 4;
-            Complex32::from_polar(1.0, std::f32::consts::FRAC_PI_2 * (m as f32))
-        })
-        .collect()
+fn known_sync_half(cfg: &OfdmConfig) -> Vec<Complex32> {
+    let l = cfg.sync_half_len;
+    if l == 0 {
+        return Vec::new();
+    }
+
+    let (used_bins, _pilot_bins, _data_bins) = ofdm_bin_plan(cfg);
+    if used_bins.is_empty() {
+        return vec![Complex32::new(0.0, 0.0); l];
+    }
+
+    let mut out = Vec::with_capacity(l);
+    for n in 0..l {
+        let mut acc = Complex32::new(0.0, 0.0);
+        for (i, &bin) in used_bins.iter().enumerate() {
+            let phase0 = std::f32::consts::FRAC_PI_2 * (((3 * i + 1) % 4) as f32);
+            let phase = phase0 + 2.0 * std::f32::consts::PI * (bin as f32) * (n as f32) / (cfg.nfft as f32);
+            acc += Complex32::from_polar(1.0, phase);
+        }
+        out.push(acc);
+    }
+
+    let scale = 1.0 / (used_bins.len() as f32).sqrt();
+    for v in &mut out {
+        *v *= scale;
+    }
+    out
 }
 
 /// Appends cyclic prefix and symbol samples to output.
@@ -650,7 +674,48 @@ fn iq_downconvert(y: &[f32], fs: f32, fc: f32) -> Vec<Complex32> {
     lowpass_fir(&mixed, fs, 5_000.0, 65)
 }
 
-/// Builds wake preamble waveform (chirp or tone with ramp envelope).
+/// Generates a deterministic bipolar PN sequence.
+///
+/// Parameters:
+/// - `n`: number of chips.
+/// Returns:
+/// - `Vec<f32>`: PN chips in `{-1, +1}`.
+fn pn_sequence(n: usize) -> Vec<f32> {
+    let mut state: u16 = 0x01FF;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let bit = (state & 1) as u8;
+        out.push(if bit == 0 { -1.0 } else { 1.0 });
+        let fb = ((state >> 8) ^ (state >> 4)) & 1;
+        state = (state >> 1) | (fb << 8);
+    }
+    out
+}
+
+/// Generates a deterministic bipolar Gold-like sequence.
+///
+/// Parameters:
+/// - `n`: number of chips.
+/// Returns:
+/// - `Vec<f32>`: Gold chips in `{-1, +1}`.
+fn gold_sequence(n: usize) -> Vec<f32> {
+    let mut s1: u16 = 0x01FF;
+    let mut s2: u16 = 0x0155;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let b1 = (s1 & 1) as u8;
+        let b2 = (s2 & 1) as u8;
+        out.push(if (b1 ^ b2) == 0 { -1.0 } else { 1.0 });
+
+        let fb1 = ((s1 >> 8) ^ (s1 >> 4)) & 1;
+        let fb2 = ((s2 >> 8) ^ (s2 >> 7) ^ (s2 >> 4) ^ (s2 >> 1)) & 1;
+        s1 = (s1 >> 1) | (fb1 << 8);
+        s2 = (s2 >> 1) | (fb2 << 8);
+    }
+    out
+}
+
+/// Builds wake preamble waveform with ramp envelope.
 ///
 /// Parameters:
 /// - `cfg`: modem configuration.
@@ -659,15 +724,26 @@ fn iq_downconvert(y: &[f32], fs: f32, fc: f32) -> Vec<Complex32> {
 fn make_wake_tone(cfg: &OfdmConfig) -> Vec<f32> {
     let n = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let ramp = ((0.001 * cfg.fs) as usize).min(n / 4);
+    let pn = pn_sequence(n);
+    let gold = gold_sequence(n);
     let mut out = vec![0.0f32; n];
     for i in 0..n {
         let t = i as f32 / cfg.fs;
-        let w = if cfg.use_chirp_sync {
-            let tmax = ((n - 1) as f32 / cfg.fs).max(1.0 / cfg.fs);
-            let k = (cfg.sync_chirp_f1 - cfg.sync_chirp_f0) / tmax;
-            (2.0 * std::f32::consts::PI * (cfg.sync_chirp_f0 * t + 0.5 * k * t * t)).sin()
-        } else {
-            (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin()
+        let w = match cfg.wake_preamble {
+            WakePreamble::Tone => (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin(),
+            WakePreamble::Chirp => {
+                let tmax = ((n - 1) as f32 / cfg.fs).max(1.0 / cfg.fs);
+                let k = (cfg.sync_chirp_f1 - cfg.sync_chirp_f0) / tmax;
+                (2.0 * std::f32::consts::PI * (cfg.sync_chirp_f0 * t + 0.5 * k * t * t)).sin()
+            }
+            WakePreamble::Pn => {
+                let chip = pn[i];
+                chip * (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin()
+            }
+            WakePreamble::Gold => {
+                let chip = gold[i];
+                chip * (2.0 * std::f32::consts::PI * cfg.wake_freq * t).sin()
+            }
         };
         let env = if ramp > 1 && i < ramp {
             i as f32 / ramp as f32

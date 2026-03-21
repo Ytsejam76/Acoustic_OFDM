@@ -92,15 +92,20 @@ Over-the-air modem test (`tx` sends encoded packet, `rx` listens and decodes):
 
 ```bash
 # terminal 1
-cargo run -p acoustic_ofdm_cli -- rx --duration-sec 6 --verbose
+cargo run -p acoustic_ofdm_cli -- rx --duration-sec 6 --wake-preamble pn \
+  --dump-wav /tmp/rx_capture.wav --verbose
 
 # terminal 2
-cargo run -p acoustic_ofdm_cli -- tx --spk-gain 0.8 --repeats 4 --pre-delay-sec 0.5 "hello-ofdm"
+cargo run -p acoustic_ofdm_cli -- tx --spk-gain 0.8 --repeats 2 --pre-delay-sec 0.5 --wake-preamble pn "hello-ofdm"
 ```
 
 Note: this binary uses `cpal`, which on Linux typically runs through ALSA
 or JACK backends and works well with PipeWire setups that provide ALSA/JACK
 compatibility layers.
+
+For Rust live-audio tests, wake preamble modes are selectable with
+`--wake-preamble pn|chirp|tone`. The default is `pn`.
+Use `--dump-wav PATH` on `rx` to save the captured audio for offline inspection.
 
 ### Octave
 

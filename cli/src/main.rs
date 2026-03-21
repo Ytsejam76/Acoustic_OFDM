@@ -13,6 +13,7 @@ use acoustic_ofdm::{
     decode_single_packet_passband,
     encode_single_packet_passband,
     load_wav_mono_f32,
+    save_spectrogram_png,
     save_wav_mono_i16,
     OfdmConfig,
     WakePreamble,
@@ -71,7 +72,7 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("      [<payload_text|stdin>]");
     eprintln!("  acoustic_ofdm_cli rx [--base-freq-hz HZ] [--duration-sec SEC] [--mic-gain GAIN]");
     eprintln!("      [--in-hp-hz HZ] [--in-lp-hz HZ] [--no-input-filter] [--wake-preamble MODE]");
-    eprintln!("      [--dump-wav PATH] [--oracle] [--stdout] [--verbose]");
+    eprintln!("      [--dump-wav PATH] [--spectrogram] [--oracle] [--stdout] [--verbose]");
     eprintln!();
     eprintln!("Common options:");
     eprintln!("  --base-freq-hz HZ   OFDM base subcarrier frequency in Hz (encode/decode/roundtrip).");
@@ -100,6 +101,7 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  --in-lp-hz HZ       RX low-pass cutoff in Hz (default: 19000).");
     eprintln!("  --no-input-filter   Disable RX input filtering (default: already off).");
     eprintln!("  --dump-wav PATH     Save captured RX audio to a mono WAV file.");
+    eprintln!("  --spectrogram       Save /tmp/rx_spectrogram.png during verbose/live RX debugging.");
     eprintln!("  --verbose           Print extra diagnostics (especially for rx).");
     eprintln!();
     eprintln!("Examples:");
@@ -112,7 +114,7 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  acoustic_ofdm_cli codec-loop --rand-echo-count 3 --rand-echo-max-ms 2.5 \"hello\"");
     eprintln!("  acoustic_ofdm_cli tx --spk-gain 0.8 --repeats 2 --wake-preamble gold \"hello\"");
     eprintln!("  acoustic_ofdm_cli tx --oracle --repeats 2 --spk-gain 0.2");
-    eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --wake-preamble gold --dump-wav /tmp/rx.wav --verbose");
+    eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --wake-preamble gold --dump-wav /tmp/rx.wav --spectrogram --verbose");
     std::process::exit(code);
 }
 
@@ -134,6 +136,7 @@ struct AudioOpts {
     input_hp_hz: f32,
     input_lp_hz: f32,
     dump_wav: Option<String>,
+    spectrogram: bool,
     oracle: bool,
     verbose: bool,
 }
@@ -266,6 +269,7 @@ fn parse_tx_args(
         input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
         dump_wav: None,
+        spectrogram: false,
         oracle: false,
         verbose: false,
     };
@@ -384,6 +388,7 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
         input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
         dump_wav: None,
+        spectrogram: false,
         oracle: false,
         verbose: false,
     };
@@ -452,6 +457,10 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
                 }
                 opts.dump_wav = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--spectrogram" => {
+                opts.spectrogram = true;
+                i += 1;
             }
             "--verbose" => {
                 opts.verbose = true;
@@ -1682,6 +1691,11 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     if let Some(path) = &opts.dump_wav {
         save_wav_mono_i16(Path::new(path), &rx, cfg_rt.fs.round() as u32)?;
         println!("Saved RX capture: {}", path);
+        if opts.spectrogram {
+            let spec_path = Path::new("/tmp/rx_spectrogram.png");
+            save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
+            println!("Saved spectrogram PNG: {}", spec_path.display());
+        }
     }
     let rx_sync = filter_for_sync_detection(
         &rx,

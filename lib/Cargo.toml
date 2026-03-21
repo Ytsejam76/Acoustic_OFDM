@@ -9,6 +9,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+image = "0.25"
 rustfft = "6"
 hound = "3"
 

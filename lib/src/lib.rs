@@ -4,6 +4,7 @@ pub mod config;
 pub mod crc;
 pub mod packet;
 pub mod modem;
+pub mod spectrogram;
 pub mod wav_io;
 
 pub use config::{Modulation, OfdmConfig, WakePreamble};
@@ -21,6 +22,7 @@ pub use modem::{
     PassbandDiagnostics,
     PassbandSyncDump,
 };
+pub use spectrogram::save_spectrogram_png;
 pub use wav_io::{load_wav_mono_f32, save_wav_mono_i16};
 
 // vim: set ts=4 sw=4 et:

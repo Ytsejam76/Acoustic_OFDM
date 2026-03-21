@@ -9,7 +9,9 @@ edition = "2021"
 acoustic_ofdm = { path = "../lib" }
 clap = { version = "4", features = ["derive"] }
 cpal = "0.16"
+log = "0.4"
 rand = "0.9"
 ringbuf = "0.4"
+simplelog = "0.12"
 
 # vim: set ts=4 sw=4 et:

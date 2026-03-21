@@ -6,6 +6,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod live_profile;
+mod logging;
+
 use acoustic_ofdm::{
     diagnose_passband_window,
     dump_passband_constellation,
@@ -21,9 +24,11 @@ use acoustic_ofdm::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
+use live_profile::{rx_default_log_file, tx_default_log_file, LiveProfileArg};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ringbuf::{traits::*, HeapRb};
+use logging::init_logging;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum WakePreambleArg {
@@ -126,18 +131,22 @@ struct CodecLoopCmd {
 struct TxCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long, default_value_t = 1.0)]
-    spk_gain: f32,
-    #[arg(long, default_value_t = 0.2)]
-    pre_delay_sec: f32,
-    #[arg(long, default_value_t = 3)]
-    repeats: usize,
-    #[arg(long, default_value_t = 0.35)]
-    gap_sec: f32,
+    #[arg(long, value_enum, default_value_t = LiveProfileArg::LiveDebug)]
+    profile: LiveProfileArg,
+    #[arg(long)]
+    spk_gain: Option<f32>,
+    #[arg(long)]
+    pre_delay_sec: Option<f32>,
+    #[arg(long)]
+    repeats: Option<usize>,
+    #[arg(long)]
+    gap_sec: Option<f32>,
     #[arg(long)]
     oracle: bool,
     #[arg(long)]
     verbose: bool,
+    #[arg(long)]
+    log_file: Option<String>,
     payload_text: Option<String>,
 }
 
@@ -145,10 +154,12 @@ struct TxCmd {
 struct RxCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long, default_value_t = 10.0)]
-    duration_sec: f32,
-    #[arg(long, default_value_t = 1.0)]
-    mic_gain: f32,
+    #[arg(long, value_enum, default_value_t = LiveProfileArg::LiveDebug)]
+    profile: LiveProfileArg,
+    #[arg(long)]
+    duration_sec: Option<f32>,
+    #[arg(long)]
+    mic_gain: Option<f32>,
     #[arg(long, default_value_t = 12_000.0)]
     in_hp_hz: f32,
     #[arg(long, default_value_t = 19_000.0)]
@@ -167,6 +178,8 @@ struct RxCmd {
     stdout: bool,
     #[arg(long)]
     verbose: bool,
+    #[arg(long)]
+    log_file: Option<String>,
 }
 
 /// Parses payload text into bytes.
@@ -266,10 +279,50 @@ fn apply_common_cfg(cfg: &mut OfdmConfig, common: &CommonCfgArgs) -> Result<(), 
     Ok(())
 }
 
+fn apply_tx_profile_cfg(cfg: &mut OfdmConfig, cmd: &TxCmd) {
+    if cmd.common.wake_preamble.is_none() {
+        cfg.wake_preamble = match cmd.profile {
+            LiveProfileArg::Standard => cfg.wake_preamble,
+            LiveProfileArg::LiveDebug => WakePreamble::Gold,
+        };
+    }
+}
+
+fn apply_rx_profile_cfg(cfg: &mut OfdmConfig, cmd: &RxCmd) {
+    if cmd.common.wake_preamble.is_none() {
+        cfg.wake_preamble = match cmd.profile {
+            LiveProfileArg::Standard => cfg.wake_preamble,
+            LiveProfileArg::LiveDebug => WakePreamble::Gold,
+        };
+    }
+}
+
+
 fn rx_audio_opts(cmd: &RxCmd) -> AudioOpts {
+    let (duration_sec, mic_gain, dump_wav, spectrogram, spectrogram_path, oracle, verbose) =
+        match cmd.profile {
+            LiveProfileArg::Standard => (
+                10.0,
+                1.0,
+                None,
+                false,
+                "/tmp/rx_spectrogram.png".to_string(),
+                false,
+                false,
+            ),
+            LiveProfileArg::LiveDebug => (
+                5.0,
+                0.2,
+                Some("/tmp/rx_capture.wav".to_string()),
+                true,
+                "/tmp/rx_spectrogram.png".to_string(),
+                true,
+                true,
+            ),
+        };
     AudioOpts {
-        duration_sec: cmd.duration_sec,
-        mic_gain: cmd.mic_gain,
+        duration_sec: cmd.duration_sec.unwrap_or(duration_sec),
+        mic_gain: cmd.mic_gain.unwrap_or(mic_gain),
         spk_gain: 1.0,
         pre_delay_sec: 0.2,
         repeats: 3,
@@ -277,30 +330,38 @@ fn rx_audio_opts(cmd: &RxCmd) -> AudioOpts {
         input_filter: false,
         input_hp_hz: cmd.in_hp_hz,
         input_lp_hz: cmd.in_lp_hz,
-        dump_wav: cmd.dump_wav.clone(),
-        spectrogram: cmd.spectrogram,
-        spectrogram_path: cmd.spectrogram_path.clone(),
-        oracle: cmd.oracle,
-        verbose: cmd.verbose,
+        dump_wav: cmd.dump_wav.clone().or(dump_wav),
+        spectrogram: cmd.spectrogram || spectrogram,
+        spectrogram_path: if cmd.spectrogram_path != "/tmp/rx_spectrogram.png" {
+            cmd.spectrogram_path.clone()
+        } else {
+            spectrogram_path
+        },
+        oracle: cmd.oracle || oracle,
+        verbose: cmd.verbose || verbose,
     }
 }
 
 fn tx_audio_opts(cmd: &TxCmd) -> AudioOpts {
+    let (spk_gain, pre_delay_sec, repeats, gap_sec, oracle, verbose) = match cmd.profile {
+        LiveProfileArg::Standard => (1.0, 0.2, 3, 0.35, false, false),
+        LiveProfileArg::LiveDebug => (0.2, 0.5, 5, 0.35, true, false),
+    };
     AudioOpts {
         duration_sec: 10.0,
         mic_gain: 1.0,
-        spk_gain: cmd.spk_gain,
-        pre_delay_sec: cmd.pre_delay_sec,
-        repeats: cmd.repeats,
-        gap_sec: cmd.gap_sec,
+        spk_gain: cmd.spk_gain.unwrap_or(spk_gain),
+        pre_delay_sec: cmd.pre_delay_sec.unwrap_or(pre_delay_sec),
+        repeats: cmd.repeats.unwrap_or(repeats),
+        gap_sec: cmd.gap_sec.unwrap_or(gap_sec),
         input_filter: false,
         input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
         dump_wav: None,
         spectrogram: false,
         spectrogram_path: "/tmp/rx_spectrogram.png".to_string(),
-        oracle: cmd.oracle,
-        verbose: cmd.verbose,
+        oracle: cmd.oracle || oracle,
+        verbose: cmd.verbose || verbose,
     }
 }
 
@@ -766,17 +827,17 @@ fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<
         opts.spk_gain,
     )?;
 
-    println!("Output device: {}", out_dev.name()?);
-    println!("Stream config: {} Hz, out {:?}", out_cfg.sample_rate().0, out_cfg.sample_format());
-    println!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
+    info_line!("Output device: {}", out_dev.name()?);
+    info_line!("Stream config: {} Hz, out {:?}", out_cfg.sample_rate().0, out_cfg.sample_format());
+    info_line!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
     if opts.oracle {
-        println!("Oracle mode: enabled ({} bytes)", payload.len());
+        info_line!("Oracle mode: enabled ({} bytes)", payload.len());
     }
-    println!("Transmit samples: {}", tx.len());
+    info_line!("Transmit samples: {}", tx.len());
     if opts.verbose {
         let tx_dur = (tx.len() as f32) / cfg_rt.fs;
         let peak = tx.iter().fold(0.0f32, |m, &v| if v.abs() > m { v.abs() } else { m });
-        println!(
+        info_line!(
             "TX diagnostics: duration={:.3}s peak={:.3} spk_gain={:.3} repeats={} pre_delay={:.2}s gap={:.2}s",
             tx_dur, peak, opts.spk_gain, opts.repeats, opts.pre_delay_sec, opts.gap_sec
         );
@@ -784,13 +845,13 @@ fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<
     out_stream.play()?;
     if opts.verbose {
         for i in 0..opts.repeats {
-            println!("TX burst {}/{}", i + 1, opts.repeats);
+            info_line!("TX burst {}/{}", i + 1, opts.repeats);
         }
     }
     let play_sec = (total_n as f32 / cfg_rt.fs) + 0.25;
     std::thread::sleep(Duration::from_secs_f32(play_sec.max(0.25)));
     drop(out_stream);
-    println!("Transmit done.");
+    info_line!("Transmit done.");
     Ok(())
 }
 
@@ -1072,14 +1133,28 @@ fn refine_wake_candidates_fractional(
     dedup
 }
 
-fn burst_active_regions(x: &[f32], fs: f32) -> Vec<(usize, usize)> {
+#[derive(Clone, Copy, Debug)]
+struct ActiveRegion {
+    start: usize,
+    end: usize,
+    mean_rms: f32,
+    peak_rms: f32,
+}
+
+fn burst_active_regions(x: &[f32], fs: f32) -> Vec<ActiveRegion> {
     if x.is_empty() {
         return Vec::new();
     }
     let win = ((0.010 * fs).round() as usize).max(1);
     let hop = ((0.002 * fs).round() as usize).max(1);
     if x.len() < win {
-        return vec![(0, x.len())];
+        let rms = (x.iter().map(|v| v * v).sum::<f32>() / (x.len() as f32)).sqrt();
+        return vec![ActiveRegion {
+            start: 0,
+            end: x.len(),
+            mean_rms: rms,
+            peak_rms: rms,
+        }];
     }
     let mut sum = x[..win].iter().map(|v| v * v).sum::<f32>();
     let mut env = Vec::<(usize, f32)>::new();
@@ -1100,50 +1175,92 @@ fn burst_active_regions(x: &[f32], fs: f32) -> Vec<(usize, usize)> {
     let th = (2.5 * noise).max(noise + 0.015);
     let min_run = ((0.025 * fs).round() as usize).max(hop);
     let pre = ((0.020 * fs).round() as usize).max(1);
-    let post = ((0.080 * fs).round() as usize).max(1);
-    let mut runs = Vec::<(usize, usize)>::new();
-    let mut cur: Option<(usize, usize)> = None;
+    let post = ((0.180 * fs).round() as usize).max(1);
+    let merge_gap = ((0.250 * fs).round() as usize).max(1);
+    let mut runs = Vec::<ActiveRegion>::new();
+    let mut cur: Option<(usize, usize, f32, f32, usize)> = None;
     for (s, e) in env {
         let active = e >= th;
         match (cur, active) {
-            (None, true) => cur = Some((s, s + win)),
-            (Some((a, _)), true) => cur = Some((a, s + win)),
-            (Some((a, b)), false) => {
+            (None, true) => cur = Some((s, s + win, e, e, 1)),
+            (Some((a, _b, sum_rms, peak_rms, nframes)), true) => {
+                cur = Some((a, s + win, sum_rms + e, peak_rms.max(e), nframes + 1));
+            }
+            (Some((a, b, sum_rms, peak_rms, nframes)), false) => {
                 if b.saturating_sub(a) >= min_run {
-                    runs.push((a.saturating_sub(pre), (b + post).min(x.len())));
+                    runs.push(ActiveRegion {
+                        start: a.saturating_sub(pre),
+                        end: (b + post).min(x.len()),
+                        mean_rms: sum_rms / (nframes as f32),
+                        peak_rms,
+                    });
                 }
                 cur = None;
             }
             (None, false) => {}
         }
     }
-    if let Some((a, b)) = cur {
+    if let Some((a, b, sum_rms, peak_rms, nframes)) = cur {
         if b.saturating_sub(a) >= min_run {
-            runs.push((a.saturating_sub(pre), (b + post).min(x.len())));
+            runs.push(ActiveRegion {
+                start: a.saturating_sub(pre),
+                end: (b + post).min(x.len()),
+                mean_rms: sum_rms / (nframes as f32),
+                peak_rms,
+            });
         }
     }
-    let mut merged = Vec::<(usize, usize)>::new();
-    for (a, b) in runs {
+    let mut merged = Vec::<ActiveRegion>::new();
+    for r in runs {
         if let Some(last) = merged.last_mut() {
-            if a <= last.1 {
-                last.1 = last.1.max(b);
+            if r.start <= last.end.saturating_add(merge_gap) {
+                let last_len = last.end.saturating_sub(last.start).max(1) as f32;
+                let r_len = r.end.saturating_sub(r.start).max(1) as f32;
+                last.end = last.end.max(r.end);
+                last.mean_rms = (last.mean_rms * last_len + r.mean_rms * r_len) / (last_len + r_len);
+                last.peak_rms = last.peak_rms.max(r.peak_rms);
                 continue;
             }
         }
-        merged.push((a, b));
+        merged.push(r);
     }
+    merged.sort_by(|a, b| {
+        let sa = a.peak_rms * (0.5 + a.mean_rms) * ((a.end - a.start) as f32).sqrt();
+        let sb = b.peak_rms * (0.5 + b.mean_rms) * ((b.end - b.start) as f32).sqrt();
+        sb.total_cmp(&sa).then_with(|| a.start.cmp(&b.start))
+    });
     merged
 }
 
-fn filter_candidates_by_regions(cands: &[(usize, f32)], regions: &[(usize, usize)]) -> Vec<(usize, f32)> {
+fn filter_candidates_by_regions(cands: &[(usize, f32)], regions: &[ActiveRegion]) -> Vec<(usize, f32)> {
     if regions.is_empty() {
         return Vec::new();
     }
+    let keep_regions = regions.len().min(3);
     cands.iter()
         .copied()
-        .filter(|(idx, _)| regions.iter().any(|(a, b)| *idx >= *a && *idx < *b))
-        .collect()
+        .filter_map(|(idx, score)| {
+            regions
+                .iter()
+                .take(keep_regions)
+                .find(|r| idx >= r.start && idx < r.end)
+                .map(|r| {
+                    let region_boost = (1.0 + 2.0 * r.mean_rms + 1.5 * r.peak_rms).max(1.0);
+                    (idx, score * region_boost)
+                })
+        })
+        .collect::<Vec<_>>()
+        .tap_mut(|v| v.sort_by(|a, b| b.1.total_cmp(&a.1)))
 }
+
+trait TapMut: Sized {
+    fn tap_mut<F: FnOnce(&mut Self)>(mut self, f: F) -> Self {
+        f(&mut self);
+        self
+    }
+}
+
+impl<T> TapMut for T {}
 
 /// Estimates one packet waveform length in passband samples.
 ///
@@ -1345,20 +1462,20 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         in_prod,
     )?;
 
-    println!("Input device : {}", in_dev.name()?);
-    println!("Stream config: {} Hz, in {:?}", in_cfg.sample_rate().0, in_cfg.sample_format());
-    println!("RX detector: wake-correlation-v2");
-    println!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
+    info_line!("Input device : {}", in_dev.name()?);
+    info_line!("Stream config: {} Hz, in {:?}", in_cfg.sample_rate().0, in_cfg.sample_format());
+    info_line!("RX detector: wake-correlation-v2");
+    info_line!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
     if opts.oracle {
-        println!("Oracle mode: enabled (expect {} bytes)", ORACLE_PAYLOAD.len());
+        info_line!("Oracle mode: enabled (expect {} bytes)", ORACLE_PAYLOAD.len());
     }
-    println!(
+    info_line!(
         "RX sync filter: {} (hp={:.1}Hz, lp={:.1}Hz)",
         if opts.input_filter { "on" } else { "off" },
         opts.input_hp_hz,
         opts.input_lp_hz
     );
-    println!("Listening for {:.2}s ...", opts.duration_sec);
+    info_line!("Listening for {:.2}s ...", opts.duration_sec);
     in_stream.play()?;
     let mut rx = Vec::<f32>::new();
     let t0 = Instant::now();
@@ -1414,14 +1531,14 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     while let Some(s) = in_cons.try_pop() {
         rx.push(s);
     }
-    println!("Captured samples: {}", rx.len());
+    info_line!("Captured samples: {}", rx.len());
     if let Some(path) = &opts.dump_wav {
         save_wav_mono_i16(Path::new(path), &rx, cfg_rt.fs.round() as u32)?;
-        println!("Saved RX capture: {}", path);
+        info_line!("Saved RX capture: {}", path);
         if opts.spectrogram {
             let spec_path = Path::new(&opts.spectrogram_path);
             save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
-            println!("Saved spectrogram PNG: {}", spec_path.display());
+            info_line!("Saved spectrogram PNG: {}", spec_path.display());
         }
     }
     let rx_sync = filter_for_sync_detection(
@@ -1447,12 +1564,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
             100.0 * clipped_frac
         );
         if peak < 0.01 {
-            println!("RX warning: very low capture level; increase speaker volume or mic gain.");
+            warn_line!("RX warning: very low capture level; increase speaker volume or mic gain.");
         }
         if clipped_frac >= 0.001 {
-            println!("RX warning: capture is clipping; reduce speaker volume, mic gain, or disable AGC.");
+            warn_line!("RX warning: capture is clipping; reduce speaker volume, mic gain, or disable AGC.");
         } else if clipped_frac >= 0.0001 {
-            println!("RX warning: capture is close to clipping.");
+            warn_line!("RX warning: capture is close to clipping.");
         }
     }
 
@@ -1492,8 +1609,9 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         }
         ranked_cands.sort_by(|a, b| {
             b.3.cmp(&a.3)
-                .then_with(|| a.0.cmp(&b.0))
                 .then_with(|| b.2.total_cmp(&a.2))
+                .then_with(|| b.1.total_cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
         });
         if opts.verbose {
             println!(
@@ -1502,6 +1620,16 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 coarse_step,
                 active_regions.len()
             );
+            for (i, r) in active_regions.iter().take(5).enumerate() {
+                println!(
+                    "  region {:2}: [{:.3}s, {:.3}s] mean_rms={:.4} peak_rms={:.4}",
+                    i + 1,
+                    (r.start as f32) / cfg_rt.fs,
+                    (r.end as f32) / cfg_rt.fs,
+                    r.mean_rms,
+                    r.peak_rms
+                );
+            }
             for (i, (idx, sc)) in cands.iter().enumerate() {
                 println!(
                     "  cand {:2}: idx={} t={:.3}s score={:.4}",
@@ -1741,12 +1869,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Rx(cmd) => {
             let mut cfg = OfdmConfig::default();
             apply_common_cfg(&mut cfg, &cmd.common)?;
+            apply_rx_profile_cfg(&mut cfg, &cmd);
+            let log_path = cmd
+                .log_file
+                .clone()
+                .or_else(|| rx_default_log_file(cmd.profile));
+            init_logging(log_path.as_deref(), cmd.verbose)?;
             let opts = rx_audio_opts(&cmd);
             cmd_rx(&cfg, &opts, cmd.stdout)?;
         }
         Commands::Tx(cmd) => {
             let mut cfg = OfdmConfig::default();
             apply_common_cfg(&mut cfg, &cmd.common)?;
+            apply_tx_profile_cfg(&mut cfg, &cmd);
+            let log_path = cmd
+                .log_file
+                .clone()
+                .or_else(|| tx_default_log_file(cmd.profile));
+            init_logging(log_path.as_deref(), cmd.verbose)?;
             let opts = tx_audio_opts(&cmd);
             let payload = if cmd.oracle {
                 ORACLE_PAYLOAD.to_vec()
@@ -1766,7 +1906,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_from_arg, Cli, Commands, ORACLE_PAYLOAD, WakePreambleArg};
+    use super::{
+        apply_rx_profile_cfg, apply_tx_profile_cfg, payload_from_arg, rx_audio_opts, tx_audio_opts,
+        Cli, Commands, LiveProfileArg, ORACLE_PAYLOAD, WakePreambleArg,
+    };
+    use acoustic_ofdm::{OfdmConfig, WakePreamble};
     use clap::Parser;
 
     /// Ensures payload parser keeps UTF-8 bytes exactly.
@@ -1841,6 +1985,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "acoustic_ofdm_cli",
             "rx",
+            "--profile",
+            "standard",
             "--duration-sec",
             "2.5",
             "--mic-gain",
@@ -1857,8 +2003,9 @@ mod tests {
         .expect("parse failed");
         match cli.command {
             Commands::Rx(cmd) => {
-                assert!((cmd.duration_sec - 2.5).abs() < 1e-6);
-                assert!((cmd.mic_gain - 0.8).abs() < 1e-6);
+                assert_eq!(cmd.profile, LiveProfileArg::Standard);
+                assert_eq!(cmd.duration_sec, Some(2.5));
+                assert_eq!(cmd.mic_gain, Some(0.8));
                 assert_eq!(cmd.common.wake_preamble, Some(WakePreambleArg::Tone));
                 assert_eq!(cmd.dump_wav.as_deref(), Some("/tmp/rx.wav"));
                 assert!(cmd.spectrogram);
@@ -1881,6 +2028,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "acoustic_ofdm_cli",
             "tx",
+            "--profile",
+            "standard",
             "--spk-gain",
             "0.7",
             "--repeats",
@@ -1893,8 +2042,9 @@ mod tests {
         .expect("parse failed");
         match cli.command {
             Commands::Tx(cmd) => {
-                assert!((cmd.spk_gain - 0.7).abs() < 1e-6);
-                assert_eq!(cmd.repeats, 4);
+                assert_eq!(cmd.profile, LiveProfileArg::Standard);
+                assert_eq!(cmd.spk_gain, Some(0.7));
+                assert_eq!(cmd.repeats, Some(4));
                 assert_eq!(cmd.common.wake_preamble, Some(WakePreambleArg::Gold));
                 assert!(cmd.verbose);
                 assert_eq!(cmd.payload_text.as_deref(), Some("hello"));
@@ -1911,16 +2061,69 @@ mod tests {
     /// - none.
     #[test]
     fn parse_tx_oracle_options() {
-        let cli = Cli::try_parse_from(["acoustic_ofdm_cli", "tx", "--oracle", "--repeats", "2"])
-            .expect("parse failed");
+        let cli =
+            Cli::try_parse_from(["acoustic_ofdm_cli", "tx", "--oracle", "--repeats", "2"])
+                .expect("parse failed");
         match cli.command {
             Commands::Tx(cmd) => {
                 assert!(cmd.oracle);
-                assert_eq!(cmd.repeats, 2);
+                assert_eq!(cmd.repeats, Some(2));
                 assert!(cmd.payload_text.is_none());
                 assert_eq!(ORACLE_PAYLOAD, b"ACOUSTIC-OFDM-ORACLE");
             }
             _ => panic!("expected tx"),
+        }
+    }
+
+    /// Ensures default TX live-debug profile resolves to the expected lab values.
+    ///
+    /// Parameters:
+    /// - none.
+    /// Returns:
+    /// - none.
+    #[test]
+    fn tx_live_debug_profile_defaults() {
+        let cli = Cli::try_parse_from(["acoustic_ofdm_cli", "tx", "hello"]).expect("parse failed");
+        match cli.command {
+            Commands::Tx(cmd) => {
+                assert_eq!(cmd.profile, LiveProfileArg::LiveDebug);
+                let mut cfg = OfdmConfig::default();
+                apply_tx_profile_cfg(&mut cfg, &cmd);
+                let opts = tx_audio_opts(&cmd);
+                assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
+                assert!((opts.spk_gain - 0.2).abs() < 1e-6);
+                assert!((opts.pre_delay_sec - 0.5).abs() < 1e-6);
+                assert_eq!(opts.repeats, 5);
+                assert!(opts.oracle);
+            }
+            _ => panic!("expected tx"),
+        }
+    }
+
+    /// Ensures default RX live-debug profile resolves to the expected lab values.
+    ///
+    /// Parameters:
+    /// - none.
+    /// Returns:
+    /// - none.
+    #[test]
+    fn rx_live_debug_profile_defaults() {
+        let cli = Cli::try_parse_from(["acoustic_ofdm_cli", "rx"]).expect("parse failed");
+        match cli.command {
+            Commands::Rx(cmd) => {
+                assert_eq!(cmd.profile, LiveProfileArg::LiveDebug);
+                let mut cfg = OfdmConfig::default();
+                apply_rx_profile_cfg(&mut cfg, &cmd);
+                let opts = rx_audio_opts(&cmd);
+                assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
+                assert!((opts.duration_sec - 5.0).abs() < 1e-6);
+                assert!((opts.mic_gain - 0.2).abs() < 1e-6);
+                assert_eq!(opts.dump_wav.as_deref(), Some("/tmp/rx_capture.wav"));
+                assert!(opts.spectrogram);
+                assert!(opts.oracle);
+                assert!(opts.verbose);
+            }
+            _ => panic!("expected rx"),
         }
     }
 

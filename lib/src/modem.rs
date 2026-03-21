@@ -29,8 +29,65 @@ pub struct PassbandDiagnostics {
     pub hest_mag_min: f32,
     pub hest_mag_mean: f32,
     pub hest_mag_max: f32,
+    pub train_recon_evm: f32,
+    pub pilot_residual_evm: f32,
+    pub post_eq_evm: f32,
     pub decoded: bool,
     pub decoded_payload_len: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PassbandConstellationDump {
+    pub pre_eq: Vec<Complex32>,
+    pub post_eq: Vec<Complex32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PassbandSyncDump {
+    pub coarse_sync_off: usize,
+    pub refined_sync_off: usize,
+    pub metrics: Vec<f32>,
+}
+
+fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
+    let h_pow = h.norm_sqr();
+    let eps = (1.0e-3f32).max(1.0e-2f32 * h_pow);
+    y * h.conj() / (h_pow + eps)
+}
+
+/// Computes RMS EVM between equalized symbols and a known reference.
+///
+/// Parameters:
+/// - `got`: equalized received symbols.
+/// - `want`: expected reference symbols.
+/// Returns:
+/// - `f32`: RMS error-vector magnitude, or `0.0` for empty input.
+fn rms_evm(got: &[Complex32], want: &[Complex32]) -> f32 {
+    if got.is_empty() || got.len() != want.len() {
+        return 0.0;
+    }
+    let mse = got
+        .iter()
+        .zip(want.iter())
+        .map(|(g, w)| (*g - *w).norm_sqr())
+        .sum::<f32>()
+        / (got.len() as f32);
+    mse.sqrt()
+}
+
+/// Computes an RMS EVM against hard decisions for the configured modulation.
+///
+/// Parameters:
+/// - `syms`: equalized constellation samples.
+/// - `modulation`: active constellation.
+/// Returns:
+/// - `f32`: RMS decision-directed EVM, or `0.0` for empty input.
+fn decision_directed_evm(syms: &[Complex32], modulation: Modulation) -> f32 {
+    if syms.is_empty() {
+        return 0.0;
+    }
+    let refs = hard_slice_symbols(syms, modulation);
+    rms_evm(syms, &refs)
 }
 
 /// Encodes a full payload into one multi-packet OFDM burst.
@@ -143,6 +200,9 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
             hest_mag_min: 0.0,
             hest_mag_mean: 0.0,
             hest_mag_max: 0.0,
+            train_recon_evm: 0.0,
+            pilot_residual_evm: 0.0,
+            post_eq_evm: 0.0,
             decoded: false,
             decoded_payload_len: None,
         };
@@ -160,7 +220,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let cfo_hz = estimate_coarse_cfo_hz(rbb_sync, cfg);
     let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
 
-    let (used_bins, _pilot_bins, _data_bins) = ofdm_bin_plan(cfg);
+    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
     let xsync_len = 2 * cfg.sync_half_len;
     let train_len = cfg.nfft + cfg.ncp;
     if rbb_cfo.len() < xsync_len + train_len || used_bins.is_empty() {
@@ -172,6 +232,9 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
             hest_mag_min: 0.0,
             hest_mag_mean: 0.0,
             hest_mag_max: 0.0,
+            train_recon_evm: 0.0,
+            pilot_residual_evm: 0.0,
+            post_eq_evm: 0.0,
             decoded: false,
             decoded_payload_len: None,
         };
@@ -182,14 +245,71 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let train_rms = (train_no_cp.iter().map(|v| v.norm_sqr()).sum::<f32>() / (train_no_cp.len() as f32)).sqrt();
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
+    let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
     let mut mags = Vec::with_capacity(used_bins.len());
     for (k, &bin) in used_bins.iter().enumerate() {
         let h = ytrain[bin] / train_known[k];
+        hest[k] = h;
         mags.push(h.norm());
     }
     let hest_mag_min = mags.iter().copied().fold(f32::INFINITY, f32::min);
     let hest_mag_max = mags.iter().copied().fold(0.0f32, f32::max);
     let hest_mag_mean = mags.iter().sum::<f32>() / (mags.len() as f32);
+    let mut ytrain_eq = Vec::with_capacity(used_bins.len());
+    for (k, &bin) in used_bins.iter().enumerate() {
+        ytrain_eq.push(regularized_equalize(ytrain[bin], hest[k]));
+    }
+    let train_recon_evm = rms_evm(&ytrain_eq, &train_known);
+    let data_start = xsync_len + train_len;
+    let sym_len = cfg.nfft + cfg.ncp;
+    let mut pilot_eq = Vec::new();
+    let mut pilot_ref = Vec::new();
+    let mut post_eq_data = Vec::new();
+    let max_syms = 3usize;
+    for i in 0..max_syms {
+        let s0 = data_start + i * sym_len;
+        let s1 = s0 + sym_len;
+        if s1 > rbb_cfo.len() {
+            break;
+        }
+        let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
+        let mut xeq_used = Vec::with_capacity(used_bins.len());
+        for (k, &bin) in used_bins.iter().enumerate() {
+            xeq_used.push(regularized_equalize(y[bin], hest[k]));
+        }
+        if !pilot_bins.is_empty() {
+            let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
+            let mut num = Complex32::new(0.0, 0.0);
+            let mut den = 0.0f32;
+            for (k, pbin) in pilot_bins.iter().enumerate() {
+                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                    num += xeq_used[pos] * pref[k].conj();
+                    den += pref[k].norm_sqr();
+                }
+            }
+            if den > 0.0 {
+                let g = num / den;
+                if g.norm() > 1e-9 {
+                    for v in &mut xeq_used {
+                        *v /= g;
+                    }
+                }
+            }
+            for (k, pbin) in pilot_bins.iter().enumerate() {
+                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                    pilot_eq.push(xeq_used[pos]);
+                    pilot_ref.push(pref[k]);
+                }
+            }
+        }
+        for dbin in &data_bins {
+            if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
+                post_eq_data.push(xeq_used[pos]);
+            }
+        }
+    }
+    let pilot_residual_evm = rms_evm(&pilot_eq, &pilot_ref);
+    let post_eq_evm = decision_directed_evm(&post_eq_data, cfg.modulation);
     let decoded = decode_packet_info_baseband(&rbb_cfo, cfg);
 
     PassbandDiagnostics {
@@ -200,9 +320,131 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
         hest_mag_min,
         hest_mag_mean,
         hest_mag_max,
+        train_recon_evm,
+        pilot_residual_evm,
+        post_eq_evm,
         decoded: decoded.is_some(),
         decoded_payload_len: decoded.map(|p| p.payload.len()),
     }
+}
+
+/// Extracts equalizer input/output constellation samples for one passband window.
+///
+/// Parameters:
+/// - `pkt_audio`: passband packet waveform window.
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `Option<PassbandConstellationDump>`: constellation samples when extraction succeeds.
+pub fn dump_passband_constellation(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+) -> Option<PassbandConstellationDump> {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb = &rbb_full[pre..];
+    let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
+    let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    let rbb_sync = &rbb[sync_off..];
+    let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+
+    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
+    if used_bins.is_empty() || data_bins.is_empty() {
+        return None;
+    }
+    let xsync_len = 2 * cfg.sync_half_len;
+    let train_len = cfg.nfft + cfg.ncp;
+    if rbb_cfo.len() < xsync_len + train_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let train_start = xsync_len;
+    let train_no_cp = &rbb_cfo[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
+    let ytrain = fft(train_no_cp);
+    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
+    let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
+    for (k, &bin) in used_bins.iter().enumerate() {
+        hest[k] = ytrain[bin] / train_known[k];
+    }
+
+    let data_start = xsync_len + train_len;
+    let sym_len = cfg.nfft + cfg.ncp;
+    let mut pre_eq = Vec::new();
+    let mut post_eq = Vec::new();
+    let max_syms = 8usize;
+    for i in 0..max_syms {
+        let s0 = data_start + i * sym_len;
+        let s1 = s0 + sym_len;
+        if s1 > rbb_cfo.len() {
+            break;
+        }
+        let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
+        let mut xeq_used = Vec::with_capacity(used_bins.len());
+        for (k, &bin) in used_bins.iter().enumerate() {
+            pre_eq.push(y[bin]);
+            xeq_used.push(regularized_equalize(y[bin], hest[k]));
+        }
+        if !pilot_bins.is_empty() {
+            let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
+            let mut num = Complex32::new(0.0, 0.0);
+            let mut den = 0.0f32;
+            for (k, pbin) in pilot_bins.iter().enumerate() {
+                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                    num += xeq_used[pos] * pref[k].conj();
+                    den += pref[k].norm_sqr();
+                }
+            }
+            if den > 0.0 {
+                let g = num / den;
+                if g.norm() > 1e-9 {
+                    for v in &mut xeq_used {
+                        *v /= g;
+                    }
+                }
+            }
+        }
+        for dbin in &data_bins {
+            if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
+                post_eq.push(xeq_used[pos]);
+            }
+        }
+    }
+
+    Some(PassbandConstellationDump { pre_eq, post_eq })
+}
+
+/// Extracts Schmidl-Cox timing metrics for one passband window.
+///
+/// Parameters:
+/// - `pkt_audio`: passband packet waveform window.
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `Option<PassbandSyncDump>`: sync metric samples and chosen offsets.
+pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandSyncDump> {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb = &rbb_full[pre..];
+    let metrics = repeated_half_sync_metrics(rbb, cfg);
+    let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
+    let refined_sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    Some(PassbandSyncDump { coarse_sync_off, refined_sync_off, metrics })
 }
 
 /// Encodes one packet into passband samples (wake + guard + OFDM body).
@@ -331,7 +573,7 @@ fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Pa
         let y = fft(&rbb[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         let mut xeq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(y[bin] / hest[k]);
+            xeq_used.push(regularized_equalize(y[bin], hest[k]));
         }
         if !pilot_bins.is_empty() {
             let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
@@ -408,17 +650,28 @@ fn decode_packet_from_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Pa
 /// Returns:
 /// - `usize`: estimated sync start offset in samples (relative to `rbb`).
 fn find_repeated_half_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig) -> usize {
+    let metrics = repeated_half_sync_metrics(rbb, cfg);
+    if metrics.is_empty() {
+        return 0;
+    }
+    let best_m = metrics.iter().copied().fold(-1.0f32, f32::max);
+    let thresh = 0.97 * best_m.max(0.0);
+    metrics
+        .iter()
+        .position(|&m| m >= thresh)
+        .unwrap_or(0)
+}
+
+fn repeated_half_sync_metrics(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<f32> {
     let l = cfg.sync_half_len;
     if l == 0 || rbb.len() < 2 * l + 2 {
-        return 0;
+        return Vec::new();
     }
-    // Search only near the expected start; wake detection should already be close.
     let max_search = ((0.12 * cfg.fs).round() as usize).min(rbb.len().saturating_sub(2 * l + 1));
     if max_search == 0 {
-        return 0;
+        return Vec::new();
     }
 
-    // v[n] = conj(r[n]) * r[n+L], e[n] = |r[n+L]|^2
     let n_terms = max_search + l;
     let mut pref_v = vec![Complex32::new(0.0, 0.0); n_terms + 1];
     let mut pref_e = vec![0.0f32; n_terms + 1];
@@ -430,21 +683,12 @@ fn find_repeated_half_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig) -> usize 
     }
 
     let mut metrics = vec![0.0f32; max_search + 1];
-    let mut best_m = -1.0f32;
     for d in 0..=max_search {
         let p = pref_v[d + l] - pref_v[d];
         let r = (pref_e[d + l] - pref_e[d]).max(1e-9);
-        let m = p.norm_sqr() / (r * r);
-        metrics[d] = m;
-        if m > best_m {
-            best_m = m;
-        }
+        metrics[d] = p.norm_sqr() / (r * r);
     }
-    let thresh = 0.97 * best_m.max(0.0);
     metrics
-        .iter()
-        .position(|&m| m >= thresh)
-        .unwrap_or(0)
 }
 
 /// Refines timing around the coarse Schmidl-Cox estimate.
@@ -591,7 +835,6 @@ fn demap_bits(syms: &[Complex32], modulation: Modulation) -> Vec<u8> {
 /// - `modulation`: modulation scheme.
 /// Returns:
 /// - `Vec<Complex32>`: nearest ideal symbols.
-#[cfg(test)]
 fn hard_slice_symbols(syms: &[Complex32], modulation: Modulation) -> Vec<Complex32> {
     match modulation {
         Modulation::Bpsk => syms

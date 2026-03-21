@@ -9,13 +9,17 @@ pub mod wav_io;
 pub use config::{Modulation, OfdmConfig, WakePreamble};
 pub use modem::{
     diagnose_passband_window,
+    dump_passband_constellation,
+    dump_passband_sync_metric,
     decode_encoded_burst_oracle,
     decode_packet_baseband,
     decode_single_packet_passband,
     encode_payload,
     encode_single_packet_passband,
     EncodedBurst,
+    PassbandConstellationDump,
     PassbandDiagnostics,
+    PassbandSyncDump,
 };
 pub use wav_io::{load_wav_mono_f32, save_wav_mono_i16};
 

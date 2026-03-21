@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use acoustic_ofdm::{
     diagnose_passband_window,
+    dump_passband_constellation,
+    dump_passband_sync_metric,
     decode_single_packet_passband,
     encode_single_packet_passband,
     load_wav_mono_f32,
@@ -992,6 +994,7 @@ fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<
     let mut cfg_rt = cfg.clone();
     cfg_rt.fs = out_cfg.sample_rate().0 as f32;
     cfg_rt.sync_half_len = ((0.25 * cfg_rt.fs * 0.5).round() as usize).max(64);
+    cfg_rt.use_pilots = Some(true);
     let tx = encode_single_packet_passband(payload, &cfg_rt);
 
     let pre_n = (opts.pre_delay_sec * cfg_rt.fs).round().max(0.0) as usize;
@@ -1341,11 +1344,17 @@ fn refine_wake_candidates_fractional(
 /// - `usize`: estimated packet sample length including wake and guard.
 fn estimated_packet_len_samples(cfg: &OfdmConfig) -> usize {
     let bps = cfg.modulation.bits_per_symbol();
-    let n_data_carriers = cfg
-        .used_bins
-        .len()
-        .saturating_sub(cfg.pilot_bins.len().min(cfg.used_bins.len()))
-        .max(1);
+    let used_bins = cfg.used_bins.len();
+    let pilots_on = cfg.use_pilots.unwrap_or(matches!(cfg.modulation, acoustic_ofdm::Modulation::Qpsk));
+    let pilot_count = if pilots_on {
+        cfg.num_pilots
+            .unwrap_or(cfg.pilot_bins.len())
+            .min(cfg.pilot_bins.len())
+            .min(used_bins)
+    } else {
+        0
+    };
+    let n_data_carriers = used_bins.saturating_sub(pilot_count).max(1);
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
     let max_bits = max_payload_bytes * 8;
     let bits_per_ofdm = n_data_carriers * bps;
@@ -1354,6 +1363,57 @@ fn estimated_packet_len_samples(cfg: &OfdmConfig) -> usize {
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     wake_len + guard_len + baseband_len
+}
+
+fn ranked_offset_hypotheses(
+    rx: &[f32],
+    seeds: &[(usize, f32, f32, bool)],
+    est_pkt: usize,
+    pad: usize,
+    cfg: &OfdmConfig,
+) -> Vec<(usize, acoustic_ofdm::PassbandDiagnostics)> {
+    let back = ((cfg.fs * 0.008).round() as isize).max(1);
+    let fwd = ((cfg.fs * 0.020).round() as isize).max(1);
+    let step = ((cfg.fs * 0.0005).round() as isize).max(1);
+    let mut scored = Vec::new();
+    for (idx, _, _, _) in seeds.iter().take(3) {
+        for dj in (-back..=fwd).step_by(step as usize) {
+            let off_i = *idx as isize + dj;
+            if off_i < 0 {
+                continue;
+            }
+            let off = off_i as usize;
+            if off >= rx.len() {
+                continue;
+            }
+            let end = off.saturating_add(est_pkt + pad).min(rx.len());
+            if end <= off + cfg.nfft + cfg.ncp {
+                continue;
+            }
+            let diag = diagnose_passband_window(&rx[off..end], cfg);
+            let score = diagnostic_candidate_score(&diag);
+            scored.push((off, score, diag));
+        }
+    }
+    scored.sort_by(|a, b| {
+        let pa = plausible_candidate(&a.2);
+        let pb = plausible_candidate(&b.2);
+        pb.cmp(&pa)
+            .then_with(|| b.1.total_cmp(&a.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut dedup = Vec::new();
+    let min_sep = ((cfg.fs * 0.0015).round() as usize).max(1);
+    for (off, _score, diag) in scored {
+        if dedup.iter().any(|(j, _)| off.abs_diff(*j) < min_sep) {
+            continue;
+        }
+        dedup.push((off, diag));
+        if dedup.len() >= 12 {
+            break;
+        }
+    }
+    dedup
 }
 
 /// Attempts a fast real-time decode on a short rolling buffer.
@@ -1382,26 +1442,21 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
             }
         }
     }
-    let back = ((cfg.fs * 0.010).round() as isize).max(1);
-    let fwd = ((cfg.fs * 0.020).round() as isize).max(1);
-    let local_step = ((cfg.fs * 0.002).round() as isize).max(1);
-    for (idx, _) in cands.iter().take(3) {
-        for dj in (-back..=fwd).step_by(local_step as usize) {
-            let off_i = *idx as isize + dj;
-            if off_i < 0 {
-                continue;
-            }
-            let off = off_i as usize;
-            if off >= rx_raw.len() {
-                continue;
-            }
-            let end = off.saturating_add(est_pkt + pad).min(rx_raw.len());
-            if end <= off + cfg.nfft + cfg.ncp {
-                continue;
-            }
-            if let Some(bytes) = decode_single_packet_passband(&rx_raw[off..end], cfg) {
-                return Some(bytes);
-            }
+    let ranked_cands: Vec<(usize, f32, f32, bool)> = cands
+        .iter()
+        .take(3)
+        .filter_map(|(idx, wake_score)| {
+            let end = idx.saturating_add(est_pkt + pad).min(rx_raw.len());
+            (end > *idx + cfg.nfft + cfg.ncp).then(|| {
+                let diag = diagnose_passband_window(&rx_raw[*idx..end], cfg);
+                (*idx, *wake_score, diagnostic_candidate_score(&diag), plausible_candidate(&diag))
+            })
+        })
+        .collect();
+    for (off, _) in ranked_offset_hypotheses(rx_raw, &ranked_cands, est_pkt, pad, cfg) {
+        let end = off.saturating_add(est_pkt + pad).min(rx_raw.len());
+        if let Some(bytes) = decode_single_packet_passband(&rx_raw[off..end], cfg) {
+            return Some(bytes);
         }
     }
     None
@@ -1410,7 +1465,7 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
 fn print_passband_diagnostics(label: &str, pkt_audio: &[f32], cfg: &OfdmConfig) {
     let d = diagnose_passband_window(pkt_audio, cfg);
     println!(
-        "{}: enough={} sync_off={} cfo={:.1}Hz train_rms={:.4} hest[min/mean/max]=[{:.3}/{:.3}/{:.3}] decoded={}",
+        "{}: enough={} sync_off={} cfo={:.1}Hz train_rms={:.4} hest[min/mean/max]=[{:.3}/{:.3}/{:.3}] evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}] decoded={}",
         label,
         d.enough_samples,
         d.sync_off,
@@ -1419,9 +1474,13 @@ fn print_passband_diagnostics(label: &str, pkt_audio: &[f32], cfg: &OfdmConfig) 
         d.hest_mag_min,
         d.hest_mag_mean,
         d.hest_mag_max,
+        d.train_recon_evm,
+        d.pilot_residual_evm,
+        d.post_eq_evm,
         d.decoded
     );
 }
+
 
 fn diagnostic_candidate_score(diag: &acoustic_ofdm::PassbandDiagnostics) -> f32 {
     if !diag.enough_samples {
@@ -1430,9 +1489,10 @@ fn diagnostic_candidate_score(diag: &acoustic_ofdm::PassbandDiagnostics) -> f32 
     let sync_penalty = 0.0001 * (diag.sync_off as f32);
     let cfo_penalty = 0.02 * diag.cfo_hz.abs();
     let train_bonus = 120.0 * diag.train_rms;
-    let hest_bonus = 6.0 * diag.hest_mag_mean - 0.8 * (diag.hest_mag_max - diag.hest_mag_min);
+    let hest_bonus = 5.0 * diag.hest_mag_mean - 0.6 * (diag.hest_mag_max - diag.hest_mag_min);
+    let evm_penalty = 4.0 * diag.train_recon_evm + 6.0 * diag.pilot_residual_evm + 3.0 * diag.post_eq_evm;
     let decoded_bonus = if diag.decoded { 1000.0 } else { 0.0 };
-    decoded_bonus + train_bonus + hest_bonus - sync_penalty - cfo_penalty
+    decoded_bonus + train_bonus + hest_bonus - sync_penalty - cfo_penalty - evm_penalty
 }
 
 fn plausible_candidate(diag: &acoustic_ofdm::PassbandDiagnostics) -> bool {
@@ -1440,6 +1500,9 @@ fn plausible_candidate(diag: &acoustic_ofdm::PassbandDiagnostics) -> bool {
         && diag.train_rms >= 0.01
         && diag.hest_mag_mean >= 0.15
         && diag.hest_mag_max >= 0.4
+        && (diag.train_recon_evm == 0.0 || diag.train_recon_evm <= 0.75)
+        && (diag.pilot_residual_evm == 0.0 || diag.pilot_residual_evm <= 1.00)
+        && (diag.post_eq_evm == 0.0 || diag.post_eq_evm <= 1.00)
 }
 
 /// Runs `rx`: captures from microphone and attempts OFDM sync+decode.
@@ -1457,6 +1520,7 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     let mut cfg_rt = cfg.clone();
     cfg_rt.fs = in_cfg.sample_rate().0 as f32;
     cfg_rt.sync_half_len = ((0.25 * cfg_rt.fs * 0.5).round() as usize).max(64);
+    cfg_rt.use_pilots = Some(true);
 
     let in_cap = (opts.duration_sec * cfg_rt.fs).ceil() as usize + 4096;
     let in_rb = HeapRb::<f32>::new(in_cap.max(4096));
@@ -1589,8 +1653,6 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     let first_end = (est_pkt + pad).min(rx.len());
     let mut dec = decode_single_packet_passband(&rx[..first_end], &cfg_rt);
     let mut attempts = 1usize;
-    let max_attempts = 5_000usize;
-    let mut progress_tick = 100usize;
     if dec.is_none() {
         let wake = make_wake_ref(&cfg_rt);
         let coarse_step = ((cfg_rt.fs * 0.0005).round() as usize).max(1);
@@ -1645,105 +1707,87 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     print_passband_diagnostics(&format!("  cand {:2} diag", i + 1), &rx[off..end], &cfg_rt);
                 }
             }
+            if let Some((idx, _, _, _)) = ranked_cands.first() {
+                let off = *idx;
+                let end = off.saturating_add(est_pkt + pad).min(rx.len());
+                if end > off + cfg_rt.nfft + cfg_rt.ncp {
+                    if let Some(dump) = dump_passband_constellation(&rx[off..end], &cfg_rt) {
+                        let pre_path = Path::new("/tmp/ofdm_constellation_pre_eq.csv");
+                        let post_path = Path::new("/tmp/ofdm_constellation_post_eq.csv");
+                        {
+                            let mut out = std::io::BufWriter::new(std::fs::File::create(pre_path)?);
+                            writeln!(out, "re,im")?;
+                            for z in &dump.pre_eq {
+                                writeln!(out, "{},{}", z.re, z.im)?;
+                            }
+                            out.flush()?;
+                        }
+                        {
+                            let mut out = std::io::BufWriter::new(std::fs::File::create(post_path)?);
+                            writeln!(out, "re,im")?;
+                            for z in &dump.post_eq {
+                                writeln!(out, "{},{}", z.re, z.im)?;
+                            }
+                            out.flush()?;
+                        }
+                        println!("Saved constellation CSV: {}", pre_path.display());
+                        println!("Saved constellation CSV: {}", post_path.display());
+                    }
+                    if let Some(sync_dump) = dump_passband_sync_metric(&rx[off..end], &cfg_rt) {
+                        let sync_path = Path::new("/tmp/ofdm_sync_metric.csv");
+                        let mut out = std::io::BufWriter::new(std::fs::File::create(sync_path)?);
+                        writeln!(out, "offset,metric")?;
+                        for (i, m) in sync_dump.metrics.iter().enumerate() {
+                            writeln!(out, "{},{}", i, m)?;
+                        }
+                        out.flush()?;
+                        println!(
+                            "Saved sync metric CSV: {} (coarse_sync_off={}, refined_sync_off={})",
+                            sync_path.display(),
+                            sync_dump.coarse_sync_off,
+                            sync_dump.refined_sync_off
+                        );
+                    }
+                }
+            }
         }
-        let back = ((cfg_rt.fs * 0.008).round() as isize).max(1);
-        let fwd = ((cfg_rt.fs * 0.020).round() as isize).max(1);
-        let local_step = 1isize;
+        let refined = ranked_offset_hypotheses(&rx, &ranked_cands, est_pkt, pad, &cfg_rt);
         if opts.verbose {
             println!(
-                "Local candidate search: [{:.1} ms, +{:.1} ms], step {:.3} ms",
-                1000.0 * (back as f32) / cfg_rt.fs,
-                1000.0 * (fwd as f32) / cfg_rt.fs,
-                1000.0 * (local_step as f32) / cfg_rt.fs
+                "Metric refinement: {} shortlisted offsets from top {} seeds",
+                refined.len(),
+                ranked_cands.len().min(3)
             );
-        }
-        for (idx, _wake_score, _diag_score, _plausible) in ranked_cands.iter().take(3) {
-            for dj in (-back..=fwd).step_by(local_step as usize) {
-                if attempts >= max_attempts {
-                    if opts.verbose {
-                        println!("Decode attempts capped at {}", max_attempts);
-                    }
-                    break;
-                }
-                let off_i = *idx as isize + dj;
-                if off_i < 0 {
-                    continue;
-                }
-                let off = off_i as usize;
-                if off >= rx.len() {
-                    continue;
-                }
-                let end = off.saturating_add(est_pkt + pad).min(rx.len());
-                if end <= off + cfg_rt.nfft + cfg_rt.ncp {
-                    continue;
-                }
-                attempts += 1;
-                if opts.verbose && attempts >= progress_tick {
-                    println!("Decode progress: attempts={}", attempts);
-                    progress_tick = attempts + 100;
-                }
-                if let Some(bytes) = decode_single_packet_passband(&rx[off..end], &cfg_rt) {
-                    if opts.verbose {
-                        println!(
-                            "Decode recovered at offset {} ({:.3}s), local shift {} samples",
-                            off,
-                            (off as f32) / cfg_rt.fs,
-                            dj
-                        );
-                    }
-                    dec = Some(bytes);
-                    break;
-                }
-            }
-            if dec.is_some() {
-                break;
-            }
-            if attempts >= max_attempts {
-                break;
-            }
-        }
-        if dec.is_none() {
-            let max_off = rx
-                .len()
-                .saturating_sub(((cfg_rt.fs * 0.15).round() as usize).max(1));
-            let step_ms = 25.0f32;
-            let step = ((cfg_rt.fs * (step_ms / 1000.0)).round() as usize).max(1);
-            if opts.verbose {
+            for (i, (off, diag)) in refined.iter().take(6).enumerate() {
                 println!(
-                    "Fallback sweep: step={} samples (~{:.1} ms), max_offset={}",
-                    step,
-                    1000.0 * (step as f32) / cfg_rt.fs,
-                    max_off
+                    "  refine {:2}: off={} t={:.3}s sync_off={} train_rms={:.4} evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}]",
+                    i + 1,
+                    off,
+                    (*off as f32) / cfg_rt.fs,
+                    diag.sync_off,
+                    diag.train_rms,
+                    diag.train_recon_evm,
+                    diag.pilot_residual_evm,
+                    diag.post_eq_evm
                 );
             }
-            for off in (0..=max_off).step_by(step) {
-                if attempts >= max_attempts {
-                    if opts.verbose {
-                        println!("Decode attempts capped at {}", max_attempts);
-                    }
-                    break;
+        }
+        for (off, _diag) in refined.iter().take(12) {
+            let end = off.saturating_add(est_pkt + pad).min(rx.len());
+            if end <= *off + cfg_rt.nfft + cfg_rt.ncp {
+                continue;
+            }
+            attempts += 1;
+            if let Some(bytes) = decode_single_packet_passband(&rx[*off..end], &cfg_rt) {
+                if opts.verbose {
+                    println!(
+                        "Decode recovered at refined offset {} ({:.3}s)",
+                        off,
+                        (*off as f32) / cfg_rt.fs
+                    );
                 }
-                let end = off.saturating_add(est_pkt + pad).min(rx.len());
-                if end <= off + cfg_rt.nfft + cfg_rt.ncp {
-                    continue;
-                }
-                attempts += 1;
-                if opts.verbose && attempts >= progress_tick {
-                    println!("Decode progress: attempts={}", attempts);
-                    progress_tick = attempts + 100;
-                }
-                if let Some(bytes) = decode_single_packet_passband(&rx[off..end], &cfg_rt) {
-                    if opts.verbose {
-                        println!(
-                            "Decode recovered at fallback offset {} ({:.3}s), step {:.1} ms",
-                            off,
-                            (off as f32) / cfg_rt.fs,
-                            step_ms
-                        );
-                    }
-                    dec = Some(bytes);
-                    break;
-                }
+                dec = Some(bytes);
+                break;
             }
         }
     }

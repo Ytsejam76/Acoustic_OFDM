@@ -12,14 +12,14 @@ pub enum LiveProfileArg {
 pub fn tx_default_log_file(profile: LiveProfileArg) -> Option<String> {
     match profile {
         LiveProfileArg::Standard => None,
-        LiveProfileArg::LiveDebug => Some("/tmp/acoustic_ofdm_tx.log".to_string()),
+        LiveProfileArg::LiveDebug => Some("acoustic_ofdm_tx.log".to_string()),
     }
 }
 
 pub fn rx_default_log_file(profile: LiveProfileArg) -> Option<String> {
     match profile {
         LiveProfileArg::Standard => None,
-        LiveProfileArg::LiveDebug => Some("/tmp/acoustic_ofdm_rx.log".to_string()),
+        LiveProfileArg::LiveDebug => Some("acoustic_ofdm_rx.log".to_string()),
     }
 }
 

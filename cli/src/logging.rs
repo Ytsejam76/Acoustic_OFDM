@@ -2,18 +2,35 @@
 
 use std::error::Error;
 
+use clap::ValueEnum;
 use log::LevelFilter;
 use simplelog::{
     ColorChoice, CombinedLogger, ConfigBuilder, SharedLogger, TermLogger, TerminalMode,
     WriteLogger,
 };
 
-pub fn init_logging(log_file: Option<&str>, verbose: bool) -> Result<(), Box<dyn Error>> {
-    let level = if verbose {
-        LevelFilter::Debug
-    } else {
-        LevelFilter::Info
-    };
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum LogLevelArg {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl From<LogLevelArg> for LevelFilter {
+    fn from(value: LogLevelArg) -> Self {
+        match value {
+            LogLevelArg::Error => LevelFilter::Error,
+            LogLevelArg::Warn => LevelFilter::Warn,
+            LogLevelArg::Info => LevelFilter::Info,
+            LogLevelArg::Debug => LevelFilter::Debug,
+            LogLevelArg::Trace => LevelFilter::Trace,
+        }
+    }
+}
+
+pub fn init_logging(log_file: Option<&str>, level: LevelFilter) -> Result<(), Box<dyn Error>> {
     let cfg = ConfigBuilder::new().set_time_format_rfc3339().build();
     let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
     loggers.push(TermLogger::new(
@@ -34,8 +51,7 @@ pub fn init_logging(log_file: Option<&str>, verbose: bool) -> Result<(), Box<dyn
 macro_rules! info_line {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        println!("{}", msg);
-        log::info!("{}", msg);
+        log::info!("{msg}");
     }};
 }
 
@@ -43,8 +59,15 @@ macro_rules! info_line {
 macro_rules! warn_line {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
-        eprintln!("{}", msg);
-        log::warn!("{}", msg);
+        log::warn!("{msg}");
+    }};
+}
+
+#[macro_export]
+macro_rules! debug_line {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        log::debug!("{msg}");
     }};
 }
 

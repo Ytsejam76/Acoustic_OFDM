@@ -28,7 +28,7 @@ use live_profile::{rx_default_log_file, tx_default_log_file, LiveProfileArg};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use ringbuf::{traits::*, HeapRb};
-use logging::init_logging;
+use logging::{init_logging, LogLevelArg};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum WakePreambleArg {
@@ -145,6 +145,8 @@ struct TxCmd {
     oracle: bool,
     #[arg(long)]
     verbose: bool,
+    #[arg(long, value_enum)]
+    log_level: Option<LogLevelArg>,
     #[arg(long)]
     log_file: Option<String>,
     payload_text: Option<String>,
@@ -178,6 +180,8 @@ struct RxCmd {
     stdout: bool,
     #[arg(long)]
     verbose: bool,
+    #[arg(long, value_enum)]
+    log_level: Option<LogLevelArg>,
     #[arg(long)]
     log_file: Option<String>,
 }
@@ -279,6 +283,16 @@ fn apply_common_cfg(cfg: &mut OfdmConfig, common: &CommonCfgArgs) -> Result<(), 
     Ok(())
 }
 
+fn resolved_log_level(explicit: Option<LogLevelArg>, verbose: bool) -> log::LevelFilter {
+    explicit
+        .map(Into::into)
+        .unwrap_or(if verbose {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
+}
+
 fn apply_tx_profile_cfg(cfg: &mut OfdmConfig, cmd: &TxCmd) {
     if cmd.common.wake_preamble.is_none() {
         cfg.wake_preamble = match cmd.profile {
@@ -338,7 +352,7 @@ fn rx_audio_opts(cmd: &RxCmd) -> AudioOpts {
             spectrogram_path
         },
         oracle: cmd.oracle || oracle,
-        verbose: cmd.verbose || verbose,
+        verbose: cmd.verbose || verbose || matches!(cmd.log_level, Some(LogLevelArg::Debug | LogLevelArg::Trace)),
     }
 }
 
@@ -361,7 +375,7 @@ fn tx_audio_opts(cmd: &TxCmd) -> AudioOpts {
         spectrogram: false,
         spectrogram_path: "/tmp/rx_spectrogram.png".to_string(),
         oracle: cmd.oracle || oracle,
-        verbose: cmd.verbose || verbose,
+        verbose: cmd.verbose || verbose || matches!(cmd.log_level, Some(LogLevelArg::Debug | LogLevelArg::Trace)),
     }
 }
 
@@ -695,34 +709,31 @@ fn cmd_codec_loop(
     ch: &ChannelOpts,
 ) -> Result<(), Box<dyn Error>> {
     if payload.len() > cfg.packet_payload_bytes {
-        return Err(format!(
-            "payload too long for single-packet app: {} > {}",
-            payload.len(),
-            cfg.packet_payload_bytes
-        )
-        .into());
+        let payload_len = payload.len();
+        let max_len = cfg.packet_payload_bytes;
+        return Err(format!("payload too long for single-packet app: {payload_len} > {max_len}").into());
     }
     let seed = ch.seed.unwrap_or_else(|| rand::rng().random::<u64>());
     let mut rng = StdRng::seed_from_u64(seed);
     let mut ok = 0usize;
     println!("codec-loop channel:");
-    println!("  seed       : {}", seed);
-    println!(
-        "  snr_db     : {}",
-        ch.snr_db
-            .map(|v| format!("{v:.2}"))
-            .unwrap_or_else(|| "none".to_string())
-    );
-    println!("  fixed_echoes: {}", ch.echoes.len());
+    println!("  seed       : {seed}");
+    let snr_db = ch
+        .snr_db
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or_else(|| "none".to_string());
+    println!("  snr_db     : {snr_db}");
+    let fixed_echoes = ch.echoes.len();
+    println!("  fixed_echoes: {fixed_echoes}");
     for (idx, &(d, g)) in ch.echoes.iter().enumerate() {
-        println!("    [{}] delay={} samples gain={:.3}", idx, d, g);
+        println!("    [{idx}] delay={d} samples gain={g:.3}");
     }
+    let rand_echo_count = ch.rand_echo_count;
+    let rand_echo_max_ms = ch.rand_echo_max_ms;
+    let rand_echo_gain_min = ch.rand_echo_gain_min;
+    let rand_echo_gain_max = ch.rand_echo_gain_max;
     println!(
-        "  random_echoes: {} per iter (max_delay_ms={:.2}, gain=[{:.3},{:.3}])",
-        ch.rand_echo_count,
-        ch.rand_echo_max_ms,
-        ch.rand_echo_gain_min,
-        ch.rand_echo_gain_max
+        "  random_echoes: {rand_echo_count} per iter (max_delay_ms={rand_echo_max_ms:.2}, gain=[{rand_echo_gain_min:.3},{rand_echo_gain_max:.3}])"
     );
     println!();
     for i in 0..iterations {
@@ -750,18 +761,16 @@ fn cmd_codec_loop(
         if pass {
             ok += 1;
         }
-        println!(
-            "[{}/{}] {}",
-            i + 1,
-            iterations,
-            if pass { "OK" } else { "FAIL" }
-        );
+        let status = if pass { "OK" } else { "FAIL" };
+        let iter = i + 1;
+        println!("[{iter}/{iterations}] {status}");
     }
     println!();
     println!("codec-loop summary:");
-    println!("  iterations : {}", iterations);
-    println!("  ok         : {}", ok);
-    println!("  fail       : {}", iterations - ok);
+    println!("  iterations : {iterations}");
+    println!("  ok         : {ok}");
+    let fail = iterations - ok;
+    println!("  fail       : {fail}");
     println!("  success    : {:.1}%", 100.0 * (ok as f32) / (iterations as f32));
     Ok(())
 }
@@ -776,12 +785,9 @@ fn cmd_codec_loop(
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
 fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<dyn Error>> {
     if payload.len() > cfg.packet_payload_bytes {
-        return Err(format!(
-            "payload too long for single-packet app: {} > {}",
-            payload.len(),
-            cfg.packet_payload_bytes
-        )
-        .into());
+        let payload_len = payload.len();
+        let max_len = cfg.packet_payload_bytes;
+        return Err(format!("payload too long for single-packet app: {payload_len} > {max_len}").into());
     }
 
     let host = cpal::default_host();
@@ -827,25 +833,36 @@ fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<
         opts.spk_gain,
     )?;
 
-    info_line!("Output device: {}", out_dev.name()?);
-    info_line!("Stream config: {} Hz, out {:?}", out_cfg.sample_rate().0, out_cfg.sample_format());
-    info_line!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
+    let output_device = out_dev.name()?;
+    info_line!("Output device: {output_device}");
+    let out_rate = out_cfg.sample_rate().0;
+    let out_format = out_cfg.sample_format();
+    info_line!("Stream config: {out_rate} Hz, out {out_format:?}");
+    let wake_preamble = cfg_rt.wake_preamble.as_str();
+    info_line!("Wake preamble: {wake_preamble}");
     if opts.oracle {
-        info_line!("Oracle mode: enabled ({} bytes)", payload.len());
+        let bytes = payload.len();
+        info_line!("Oracle mode: enabled ({bytes} bytes)");
     }
-    info_line!("Transmit samples: {}", tx.len());
+    let tx_samples = tx.len();
+    info_line!("Transmit samples: {tx_samples}");
     if opts.verbose {
         let tx_dur = (tx.len() as f32) / cfg_rt.fs;
         let peak = tx.iter().fold(0.0f32, |m, &v| if v.abs() > m { v.abs() } else { m });
+        let spk_gain = opts.spk_gain;
+        let repeats = opts.repeats;
+        let pre_delay_sec = opts.pre_delay_sec;
+        let gap_sec = opts.gap_sec;
         info_line!(
-            "TX diagnostics: duration={:.3}s peak={:.3} spk_gain={:.3} repeats={} pre_delay={:.2}s gap={:.2}s",
-            tx_dur, peak, opts.spk_gain, opts.repeats, opts.pre_delay_sec, opts.gap_sec
+            "TX diagnostics: duration={tx_dur:.3}s peak={peak:.3} spk_gain={spk_gain:.3} repeats={repeats} pre_delay={pre_delay_sec:.2}s gap={gap_sec:.2}s"
         );
     }
     out_stream.play()?;
     if opts.verbose {
         for i in 0..opts.repeats {
-            info_line!("TX burst {}/{}", i + 1, opts.repeats);
+            let burst = i + 1;
+            let repeats = opts.repeats;
+            info_line!("TX burst {burst}/{repeats}");
         }
     }
     let play_sec = (total_n as f32 / cfg_rt.fs) + 0.25;
@@ -1392,20 +1409,19 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
 
 fn print_passband_diagnostics(label: &str, pkt_audio: &[f32], cfg: &OfdmConfig) {
     let d = diagnose_passband_window(pkt_audio, cfg);
-    println!(
-        "{}: enough={} sync_off={} cfo={:.1}Hz train_rms={:.4} hest[min/mean/max]=[{:.3}/{:.3}/{:.3}] evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}] decoded={}",
-        label,
-        d.enough_samples,
-        d.sync_off,
-        d.cfo_hz,
-        d.train_rms,
-        d.hest_mag_min,
-        d.hest_mag_mean,
-        d.hest_mag_max,
-        d.train_recon_evm,
-        d.pilot_residual_evm,
-        d.post_eq_evm,
-        d.decoded
+    let enough = d.enough_samples;
+    let sync_off = d.sync_off;
+    let cfo_hz = d.cfo_hz;
+    let train_rms = d.train_rms;
+    let hest_mag_min = d.hest_mag_min;
+    let hest_mag_mean = d.hest_mag_mean;
+    let hest_mag_max = d.hest_mag_max;
+    let train_recon_evm = d.train_recon_evm;
+    let pilot_residual_evm = d.pilot_residual_evm;
+    let post_eq_evm = d.post_eq_evm;
+    let decoded = d.decoded;
+    debug_line!(
+        "{label}: enough={enough} sync_off={sync_off} cfo={cfo_hz:.1}Hz train_rms={train_rms:.4} hest[min/mean/max]=[{hest_mag_min:.3}/{hest_mag_mean:.3}/{hest_mag_max:.3}] evm[train/pilot/data]=[{train_recon_evm:.3}/{pilot_residual_evm:.3}/{post_eq_evm:.3}] decoded={decoded}"
     );
 }
 
@@ -1462,20 +1478,24 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         in_prod,
     )?;
 
-    info_line!("Input device : {}", in_dev.name()?);
-    info_line!("Stream config: {} Hz, in {:?}", in_cfg.sample_rate().0, in_cfg.sample_format());
+    let input_device = in_dev.name()?;
+    info_line!("Input device : {input_device}");
+    let in_rate = in_cfg.sample_rate().0;
+    let in_format = in_cfg.sample_format();
+    info_line!("Stream config: {in_rate} Hz, in {in_format:?}");
     info_line!("RX detector: wake-correlation-v2");
-    info_line!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
+    let wake_preamble = cfg_rt.wake_preamble.as_str();
+    info_line!("Wake preamble: {wake_preamble}");
     if opts.oracle {
-        info_line!("Oracle mode: enabled (expect {} bytes)", ORACLE_PAYLOAD.len());
+        let expected_bytes = ORACLE_PAYLOAD.len();
+        info_line!("Oracle mode: enabled (expect {expected_bytes} bytes)");
     }
-    info_line!(
-        "RX sync filter: {} (hp={:.1}Hz, lp={:.1}Hz)",
-        if opts.input_filter { "on" } else { "off" },
-        opts.input_hp_hz,
-        opts.input_lp_hz
-    );
-    info_line!("Listening for {:.2}s ...", opts.duration_sec);
+    let filter_state = if opts.input_filter { "on" } else { "off" };
+    let input_hp_hz = opts.input_hp_hz;
+    let input_lp_hz = opts.input_lp_hz;
+    info_line!("RX sync filter: {filter_state} (hp={input_hp_hz:.1}Hz, lp={input_lp_hz:.1}Hz)");
+    let duration_sec = opts.duration_sec;
+    info_line!("Listening for {duration_sec:.2}s ...");
     in_stream.play()?;
     let mut rx = Vec::<f32>::new();
     let t0 = Instant::now();
@@ -1488,16 +1508,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
             let tail_span = ((cfg_rt.fs * 3.0).round() as usize).max(1);
             let st = rx.len().saturating_sub(tail_span);
             if let Some(bytes) = quick_realtime_decode(&rx[st..], &rx[st..], &cfg_rt) {
-                println!(
-                    "Realtime decode: OK at t={:.3}s ({} bytes)",
-                    t0.elapsed().as_secs_f32(),
-                    bytes.len()
-                );
+                let rt = t0.elapsed().as_secs_f32();
+                let nbytes = bytes.len();
+                info_line!("Realtime decode: OK at t={rt:.3}s ({nbytes} bytes)");
                 if opts.oracle {
-                    println!(
-                        "Oracle verdict: {}",
-                        if bytes.as_slice() == ORACLE_PAYLOAD { "match" } else { "mismatch" }
-                    );
+                    let verdict = if bytes.as_slice() == ORACLE_PAYLOAD { "match" } else { "mismatch" };
+                    info_line!("Oracle verdict: {verdict}");
                 }
                 if stdout_raw {
                     let mut out = std::io::stdout().lock();
@@ -1509,18 +1525,17 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                         .map(|b| format!("{b:02X}"))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    println!("HEX: {hex}");
-                    println!("UTF8(lossy): {}", String::from_utf8_lossy(&bytes));
+                    info_line!("HEX: {hex}");
+                    let text = String::from_utf8_lossy(&bytes);
+                    info_line!("UTF8(lossy): {text}");
                 }
                 drop(in_stream);
                 return Ok(());
             }
             if opts.verbose {
-                println!(
-                    "Realtime: checked t={:.3}s captured={}",
-                    t0.elapsed().as_secs_f32(),
-                    rx.len()
-                );
+                let rt = t0.elapsed().as_secs_f32();
+                let captured = rx.len();
+                debug_line!("Realtime: checked t={rt:.3}s captured={captured}");
             }
             last_rt_try = Instant::now();
         }
@@ -1531,14 +1546,16 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     while let Some(s) = in_cons.try_pop() {
         rx.push(s);
     }
-    info_line!("Captured samples: {}", rx.len());
+    let captured_samples = rx.len();
+    info_line!("Captured samples: {captured_samples}");
     if let Some(path) = &opts.dump_wav {
         save_wav_mono_i16(Path::new(path), &rx, cfg_rt.fs.round() as u32)?;
-        info_line!("Saved RX capture: {}", path);
+        info_line!("Saved RX capture: {path}");
         if opts.spectrogram {
             let spec_path = Path::new(&opts.spectrogram_path);
             save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
-            info_line!("Saved spectrogram PNG: {}", spec_path.display());
+            let spectrogram_path = spec_path.display();
+            info_line!("Saved spectrogram PNG: {spectrogram_path}");
         }
     }
     let rx_sync = filter_for_sync_detection(
@@ -1551,18 +1568,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     let (rms, peak, first_loud) = signal_diag(&rx);
     let (clipped, clipped_frac) = clipping_diag(&rx);
     if opts.verbose {
-        println!(
-            "RX diagnostics: rms={:.5} peak={:.5} first_loud_sample={} ({:.3}s)",
-            rms,
-            peak,
-            first_loud,
-            (first_loud as f32) / cfg_rt.fs
+        let first_loud_sec = (first_loud as f32) / cfg_rt.fs;
+        debug_line!(
+            "RX diagnostics: rms={rms:.5} peak={peak:.5} first_loud_sample={first_loud} ({first_loud_sec:.3}s)"
         );
-        println!(
-            "RX clipping: {} samples ({:.2}%) at |x| >= 0.995",
-            clipped,
-            100.0 * clipped_frac
-        );
+        let clipped_pct = 100.0 * clipped_frac;
+        debug_line!("RX clipping: {clipped} samples ({clipped_pct:.2}%) at |x| >= 0.995");
         if peak < 0.01 {
             warn_line!("RX warning: very low capture level; increase speaker volume or mic gain.");
         }
@@ -1576,12 +1587,8 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     let est_pkt = estimated_packet_len_samples(&cfg_rt);
     let pad = ((0.050 * cfg_rt.fs).round() as usize).max(1);
     if opts.verbose {
-        println!(
-            "Decode window: est_packet={} samples ({:.3}s), pad={} samples",
-            est_pkt,
-            (est_pkt as f32) / cfg_rt.fs,
-            pad
-        );
+        let est_pkt_sec = (est_pkt as f32) / cfg_rt.fs;
+        debug_line!("Decode window: est_packet={est_pkt} samples ({est_pkt_sec:.3}s), pad={pad} samples");
     }
     let first_end = (est_pkt + pad).min(rx.len());
     let mut dec = decode_single_packet_passband(&rx[..first_end], &cfg_rt);
@@ -1614,40 +1621,37 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 .then_with(|| a.0.cmp(&b.0))
         });
         if opts.verbose {
-            println!(
-                "Wake search: {} candidates (step={} samples, active_regions={})",
-                cands.len(),
-                coarse_step,
-                active_regions.len()
+            let ncands = cands.len();
+            let nregions = active_regions.len();
+            debug_line!(
+                "Wake search: {ncands} candidates (step={coarse_step} samples, active_regions={nregions})"
             );
             for (i, r) in active_regions.iter().take(5).enumerate() {
-                println!(
-                    "  region {:2}: [{:.3}s, {:.3}s] mean_rms={:.4} peak_rms={:.4}",
-                    i + 1,
-                    (r.start as f32) / cfg_rt.fs,
-                    (r.end as f32) / cfg_rt.fs,
-                    r.mean_rms,
-                    r.peak_rms
+                let region = i + 1;
+                let start_sec = (r.start as f32) / cfg_rt.fs;
+                let end_sec = (r.end as f32) / cfg_rt.fs;
+                let mean_rms = r.mean_rms;
+                let peak_rms = r.peak_rms;
+                debug_line!(
+                    "  region {region:2}: [{start_sec:.3}s, {end_sec:.3}s] mean_rms={mean_rms:.4} peak_rms={peak_rms:.4}"
                 );
             }
             for (i, (idx, sc)) in cands.iter().enumerate() {
-                println!(
-                    "  cand {:2}: idx={} t={:.3}s score={:.4}",
-                    i + 1,
-                    idx,
-                    (*idx as f32) / cfg_rt.fs,
-                    sc
-                );
+                let cand = i + 1;
+                let idx_val = *idx;
+                let time_sec = (idx_val as f32) / cfg_rt.fs;
+                let score = *sc;
+                debug_line!("  cand {cand:2}: idx={idx_val} t={time_sec:.3}s score={score:.4}");
             }
             for (i, (idx, wake_score, diag_score, plausible)) in ranked_cands.iter().take(3).enumerate() {
-                println!(
-                    "  rank {:2}: idx={} t={:.3}s wake_score={:.4} diag_score={:.4} plausible={}",
-                    i + 1,
-                    idx,
-                    (*idx as f32) / cfg_rt.fs,
-                    wake_score,
-                    diag_score,
-                    plausible
+                let rank = i + 1;
+                let idx_val = *idx;
+                let time_sec = (idx_val as f32) / cfg_rt.fs;
+                let wake_score = *wake_score;
+                let diag_score = *diag_score;
+                let plausible = *plausible;
+                debug_line!(
+                    "  rank {rank:2}: idx={idx_val} t={time_sec:.3}s wake_score={wake_score:.4} diag_score={diag_score:.4} plausible={plausible}"
                 );
             }
             for (i, (idx, _, _, _)) in ranked_cands.iter().take(3).enumerate() {
@@ -1680,8 +1684,10 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                             }
                             out.flush()?;
                         }
-                        println!("Saved constellation CSV: {}", pre_path.display());
-                        println!("Saved constellation CSV: {}", post_path.display());
+                        let pre_csv = pre_path.display();
+                        let post_csv = post_path.display();
+                        debug_line!("Saved constellation CSV: {pre_csv}");
+                        debug_line!("Saved constellation CSV: {post_csv}");
                     }
                     if let Some(sync_dump) = dump_passband_sync_metric(&rx[off..end], &cfg_rt) {
                         let sync_path = Path::new("/tmp/ofdm_sync_metric.csv");
@@ -1691,11 +1697,11 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                             writeln!(out, "{},{}", i, m)?;
                         }
                         out.flush()?;
-                        println!(
-                            "Saved sync metric CSV: {} (coarse_sync_off={}, refined_sync_off={})",
-                            sync_path.display(),
-                            sync_dump.coarse_sync_off,
-                            sync_dump.refined_sync_off
+                        let sync_csv = sync_path.display();
+                        let coarse_sync_off = sync_dump.coarse_sync_off;
+                        let refined_sync_off = sync_dump.refined_sync_off;
+                        debug_line!(
+                            "Saved sync metric CSV: {sync_csv} (coarse_sync_off={coarse_sync_off}, refined_sync_off={refined_sync_off})"
                         );
                     }
                 }
@@ -1703,22 +1709,20 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         }
         let refined = ranked_offset_hypotheses(&rx, &ranked_cands, est_pkt, pad, &cfg_rt);
         if opts.verbose {
-            println!(
-                "Metric refinement: {} shortlisted offsets from top {} seeds",
-                refined.len(),
-                ranked_cands.len().min(3)
-            );
+            let nrefined = refined.len();
+            let nseeds = ranked_cands.len().min(3);
+            debug_line!("Metric refinement: {nrefined} shortlisted offsets from top {nseeds} seeds");
             for (i, (off, diag)) in refined.iter().take(6).enumerate() {
-                println!(
-                    "  refine {:2}: off={} t={:.3}s sync_off={} train_rms={:.4} evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}]",
-                    i + 1,
-                    off,
-                    (*off as f32) / cfg_rt.fs,
-                    diag.sync_off,
-                    diag.train_rms,
-                    diag.train_recon_evm,
-                    diag.pilot_residual_evm,
-                    diag.post_eq_evm
+                let refine = i + 1;
+                let off_val = *off;
+                let time_sec = (off_val as f32) / cfg_rt.fs;
+                let sync_off = diag.sync_off;
+                let train_rms = diag.train_rms;
+                let train_recon_evm = diag.train_recon_evm;
+                let pilot_residual_evm = diag.pilot_residual_evm;
+                let post_eq_evm = diag.post_eq_evm;
+                debug_line!(
+                    "  refine {refine:2}: off={off_val} t={time_sec:.3}s sync_off={sync_off} train_rms={train_rms:.4} evm[train/pilot/data]=[{train_recon_evm:.3}/{pilot_residual_evm:.3}/{post_eq_evm:.3}]",
                 );
             }
         }
@@ -1730,11 +1734,8 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
             attempts += 1;
             if let Some(bytes) = decode_single_packet_passband(&rx[*off..end], &cfg_rt) {
                 if opts.verbose {
-                    println!(
-                        "Decode recovered at refined offset {} ({:.3}s)",
-                        off,
-                        (*off as f32) / cfg_rt.fs
-                    );
+                    let off_sec = (*off as f32) / cfg_rt.fs;
+                    debug_line!("Decode recovered at refined offset {off} ({off_sec:.3}s)");
                 }
                 dec = Some(bytes);
                 break;
@@ -1742,17 +1743,16 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         }
     }
     if opts.verbose {
-        println!("Decode attempts: {}", attempts);
+        info_line!("Decode attempts: {attempts}");
     }
 
     match dec {
         Some(bytes) => {
-            println!("Decode: OK ({} bytes)", bytes.len());
+            let decoded_bytes = bytes.len();
+            info_line!("Decode: OK ({decoded_bytes} bytes)");
             if opts.oracle {
-                println!(
-                    "Oracle verdict: {}",
-                    if bytes.as_slice() == ORACLE_PAYLOAD { "match" } else { "mismatch" }
-                );
+                let verdict = if bytes.as_slice() == ORACLE_PAYLOAD { "match" } else { "mismatch" };
+                info_line!("Oracle verdict: {verdict}");
             }
             if stdout_raw {
                 let mut out = std::io::stdout().lock();
@@ -1764,12 +1764,13 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     .map(|b| format!("{b:02X}"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                println!("HEX: {hex}");
-                println!("UTF8(lossy): {}", String::from_utf8_lossy(&bytes));
+                info_line!("HEX: {hex}");
+                let text = String::from_utf8_lossy(&bytes);
+                info_line!("UTF8(lossy): {text}");
             }
         }
         None => {
-            println!("Decode: FAIL (sync/CFO/equalization/CRC path)");
+            warn_line!("Decode: FAIL (sync/CFO/equalization/CRC path)");
         }
     }
     Ok(())
@@ -1785,16 +1786,14 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
 fn cmd_encode(out_path: &Path, payload: &[u8], cfg: &OfdmConfig) -> Result<(), Box<dyn Error>> {
     if payload.len() > cfg.packet_payload_bytes {
-        return Err(format!(
-            "payload too long for single-packet app: {} > {}",
-            payload.len(),
-            cfg.packet_payload_bytes
-        )
-        .into());
+        let payload_len = payload.len();
+        let max_len = cfg.packet_payload_bytes;
+        return Err(format!("payload too long for single-packet app: {payload_len} > {max_len}").into());
     }
     let y = encode_single_packet_passband(payload, cfg);
     save_wav_mono_i16(out_path, &y, cfg.fs as u32)?;
-    println!("Wrote WAV: {}", out_path.display());
+    let out_wav = out_path.display();
+    println!("Wrote WAV: {out_wav}");
     Ok(())
 }
 
@@ -1808,7 +1807,8 @@ fn cmd_encode(out_path: &Path, payload: &[u8], cfg: &OfdmConfig) -> Result<(), B
 fn cmd_decode(in_path: &Path, cfg: &OfdmConfig, stdout_raw: bool) -> Result<(), Box<dyn Error>> {
     let (samples, sr) = load_wav_mono_f32(in_path)?;
     if sr != cfg.fs as u32 {
-        return Err(format!("sample-rate mismatch: wav={} cfg={}", sr, cfg.fs as u32).into());
+        let cfg_sr = cfg.fs as u32;
+        return Err(format!("sample-rate mismatch: wav={sr} cfg={cfg_sr}").into());
     }
     let payload = decode_single_packet_passband(&samples, cfg).ok_or("decode failed")?;
     if stdout_raw {
@@ -1821,9 +1821,11 @@ fn cmd_decode(in_path: &Path, cfg: &OfdmConfig, stdout_raw: bool) -> Result<(), 
             .map(|b| format!("{b:02X}"))
             .collect::<Vec<_>>()
             .join(" ");
-        println!("Decoded {} bytes", payload.len());
+        let decoded_bytes = payload.len();
+        println!("Decoded {decoded_bytes} bytes");
         println!("HEX: {hex}");
-        println!("UTF8(lossy): {}", String::from_utf8_lossy(&payload));
+        let text = String::from_utf8_lossy(&payload);
+        println!("UTF8(lossy): {text}");
     }
     Ok(())
 }
@@ -1874,7 +1876,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .log_file
                 .clone()
                 .or_else(|| rx_default_log_file(cmd.profile));
-            init_logging(log_path.as_deref(), cmd.verbose)?;
+            init_logging(log_path.as_deref(), resolved_log_level(cmd.log_level, cmd.verbose))?;
+            if let Some(path) = &log_path {
+                info_line!("Log file: {path}");
+            }
             let opts = rx_audio_opts(&cmd);
             cmd_rx(&cfg, &opts, cmd.stdout)?;
         }
@@ -1886,7 +1891,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .log_file
                 .clone()
                 .or_else(|| tx_default_log_file(cmd.profile));
-            init_logging(log_path.as_deref(), cmd.verbose)?;
+            init_logging(log_path.as_deref(), resolved_log_level(cmd.log_level, cmd.verbose))?;
+            if let Some(path) = &log_path {
+                info_line!("Log file: {path}");
+            }
             let opts = tx_audio_opts(&cmd);
             let payload = if cmd.oracle {
                 ORACLE_PAYLOAD.to_vec()
@@ -1912,6 +1920,7 @@ mod tests {
     };
     use acoustic_ofdm::{OfdmConfig, WakePreamble};
     use clap::Parser;
+    use crate::live_profile::{rx_default_log_file, tx_default_log_file};
 
     /// Ensures payload parser keeps UTF-8 bytes exactly.
     ///
@@ -2095,6 +2104,10 @@ mod tests {
                 assert!((opts.pre_delay_sec - 0.5).abs() < 1e-6);
                 assert_eq!(opts.repeats, 5);
                 assert!(opts.oracle);
+                assert_eq!(
+                    tx_default_log_file(cmd.profile).as_deref(),
+                    Some("acoustic_ofdm_tx.log")
+                );
             }
             _ => panic!("expected tx"),
         }
@@ -2122,6 +2135,10 @@ mod tests {
                 assert!(opts.spectrogram);
                 assert!(opts.oracle);
                 assert!(opts.verbose);
+                assert_eq!(
+                    rx_default_log_file(cmd.profile).as_deref(),
+                    Some("acoustic_ofdm_rx.log")
+                );
             }
             _ => panic!("expected rx"),
         }

@@ -1423,6 +1423,25 @@ fn print_passband_diagnostics(label: &str, pkt_audio: &[f32], cfg: &OfdmConfig) 
     );
 }
 
+fn diagnostic_candidate_score(diag: &acoustic_ofdm::PassbandDiagnostics) -> f32 {
+    if !diag.enough_samples {
+        return -1e9;
+    }
+    let sync_penalty = 0.0001 * (diag.sync_off as f32);
+    let cfo_penalty = 0.02 * diag.cfo_hz.abs();
+    let train_bonus = 120.0 * diag.train_rms;
+    let hest_bonus = 6.0 * diag.hest_mag_mean - 0.8 * (diag.hest_mag_max - diag.hest_mag_min);
+    let decoded_bonus = if diag.decoded { 1000.0 } else { 0.0 };
+    decoded_bonus + train_bonus + hest_bonus - sync_penalty - cfo_penalty
+}
+
+fn plausible_candidate(diag: &acoustic_ofdm::PassbandDiagnostics) -> bool {
+    diag.enough_samples
+        && diag.train_rms >= 0.01
+        && diag.hest_mag_mean >= 0.15
+        && diag.hest_mag_max >= 0.4
+}
+
 /// Runs `rx`: captures from microphone and attempts OFDM sync+decode.
 ///
 /// Parameters:
@@ -1577,6 +1596,22 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         let coarse_step = ((cfg_rt.fs * 0.0005).round() as usize).max(1);
         let cands0 = wake_candidates(&rx_sync, &wake, coarse_step, 12, est_pkt);
         let cands = refine_wake_candidates_fractional(&rx_sync, &wake, &cands0);
+        let mut ranked_cands: Vec<(usize, f32, f32, bool)> = Vec::new();
+        for (idx, wake_score) in cands.iter().copied().take(8) {
+            let end = idx.saturating_add(est_pkt + pad).min(rx.len());
+            if end <= idx + cfg_rt.nfft + cfg_rt.ncp {
+                continue;
+            }
+            let diag = diagnose_passband_window(&rx[idx..end], &cfg_rt);
+            let diag_score = diagnostic_candidate_score(&diag);
+            let plausible = plausible_candidate(&diag);
+            ranked_cands.push((idx, wake_score, diag_score, plausible));
+        }
+        ranked_cands.sort_by(|a, b| {
+            b.3.cmp(&a.3)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| b.2.total_cmp(&a.2))
+        });
         if opts.verbose {
             println!(
                 "Wake search: {} candidates (step={} samples)",
@@ -1592,7 +1627,18 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     sc
                 );
             }
-            for (i, (idx, _)) in cands.iter().take(3).enumerate() {
+            for (i, (idx, wake_score, diag_score, plausible)) in ranked_cands.iter().take(3).enumerate() {
+                println!(
+                    "  rank {:2}: idx={} t={:.3}s wake_score={:.4} diag_score={:.4} plausible={}",
+                    i + 1,
+                    idx,
+                    (*idx as f32) / cfg_rt.fs,
+                    wake_score,
+                    diag_score,
+                    plausible
+                );
+            }
+            for (i, (idx, _, _, _)) in ranked_cands.iter().take(3).enumerate() {
                 let off = *idx;
                 let end = off.saturating_add(est_pkt + pad).min(rx.len());
                 if end > off + cfg_rt.nfft + cfg_rt.ncp {
@@ -1600,18 +1646,18 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 }
             }
         }
-        let back = ((cfg_rt.fs * 0.010).round() as isize).max(1);
-        let fwd = ((cfg_rt.fs * 0.025).round() as isize).max(1);
-        let local_step = ((cfg_rt.fs * 0.002).round() as isize).max(1);
+        let back = ((cfg_rt.fs * 0.008).round() as isize).max(1);
+        let fwd = ((cfg_rt.fs * 0.020).round() as isize).max(1);
+        let local_step = 1isize;
         if opts.verbose {
             println!(
-                "Local candidate search: [{:.1} ms, +{:.1} ms], step {:.1} ms",
+                "Local candidate search: [{:.1} ms, +{:.1} ms], step {:.3} ms",
                 1000.0 * (back as f32) / cfg_rt.fs,
                 1000.0 * (fwd as f32) / cfg_rt.fs,
                 1000.0 * (local_step as f32) / cfg_rt.fs
             );
         }
-        for (idx, _score) in cands.iter().take(10) {
+        for (idx, _wake_score, _diag_score, _plausible) in ranked_cands.iter().take(3) {
             for dj in (-back..=fwd).step_by(local_step as usize) {
                 if attempts >= max_attempts {
                     if opts.verbose {

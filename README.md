@@ -8,12 +8,17 @@ This repository is a reconstruction of an older (2014) personal experiment: a sh
 
 The original production target was mobile code (Java on Android, Objective-C on iOS). Octave/Matlab was and still is the exploration environment; Rust is the current implementation path.
 
+I am not an expert in electrical communications, and I am approaching this much more as a learner than as a domain specialist. What keeps me interested is DSP: to me, DSP is real magic, and the mathematical structure behind modulation, synchronization, estimation, and decoding is what makes this fun to explore. 
+
+At the end of the day, this may or may not end up working well as a practical modem, but it is a useful toy project for learning, experimenting, and understanding the pieces better.
+
 ## Status
 
-- Octave: main reference implementation, including channel simulation, synchronization experiments, BER/PER sweeps, and plotting.
-- Rust (`acoustic_ofdm`): core packet/modulation/demodulation path is ported with tests.
-- Rust CLI (`acoustic_ofdm_cli`): test app for WAV encode/decode is available.
-- Rust non-oracle sync search is not fully ported yet.
+- Octave: main reference implementation, including channel simulation, synchronization experiments, BER/PER sweeps, constellation/time-domain plots, and echo models.
+- Rust (`acoustic_ofdm`): packet build/parse, passband modulation/demodulation, BPSK/QPSK, configurable base frequency, pilots, equalization, sync diagnostics, and oracle round-trip tests are in place.
+- Rust CLI (`acoustic_ofdm_cli`): `clap`-based CLI with WAV encode/decode, roundtrip, codec-loop channel simulation, and live `tx`/`rx` commands is available.
+- Rust live-audio debugging support includes WAV capture dumps, spectrogram export, sync-metric dumps, and constellation dumps.
+- Rust live non-oracle over-the-air synchronization is still experimental and not yet reliable enough to describe as working.
 
 ## Links
 

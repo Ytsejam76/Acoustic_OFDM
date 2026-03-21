@@ -104,8 +104,10 @@ or JACK backends and works well with PipeWire setups that provide ALSA/JACK
 compatibility layers.
 
 For Rust live-audio tests, wake preamble modes are selectable with
-`--wake-preamble pn|chirp|tone`. The default is `pn`.
+`--wake-preamble gold|pn|chirp|tone`. The default is `gold`.
 Use `--dump-wav PATH` on `rx` to save the captured audio for offline inspection.
+Use `--oracle` on both `tx` and `rx` to send and verify a fixed known payload
+while debugging live synchronization.
 
 ### Octave
 

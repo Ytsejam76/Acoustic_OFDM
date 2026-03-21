@@ -119,7 +119,7 @@ impl Default for OfdmConfig {
             modulation: Modulation::Bpsk,
             wake_ms: 100.0,
             wake_freq: 16_500.0,
-            wake_guard_ms: 4.0,
+            wake_guard_ms: 15.0,
             wake_preamble: WakePreamble::Gold,
             sync_chirp_f0: 4_000.0,
             sync_chirp_f1: 8_000.0,

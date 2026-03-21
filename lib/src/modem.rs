@@ -20,6 +20,19 @@ pub struct EncodedBurst {
     pub packet_meta: Vec<EncodedPacketMeta>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PassbandDiagnostics {
+    pub enough_samples: bool,
+    pub sync_off: usize,
+    pub cfo_hz: f32,
+    pub train_rms: f32,
+    pub hest_mag_min: f32,
+    pub hest_mag_mean: f32,
+    pub hest_mag_max: f32,
+    pub decoded: bool,
+    pub decoded_payload_len: Option<usize>,
+}
+
 /// Encodes a full payload into one multi-packet OFDM burst.
 ///
 /// Parameters:
@@ -109,6 +122,87 @@ pub fn encode_single_packet_passband(payload: &[u8], cfg: &OfdmConfig) -> Vec<f3
 /// - `Option<Vec<u8>>`: decoded payload bytes, or `None` on failure.
 pub fn decode_single_packet_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Vec<u8>> {
     decode_packet_from_passband(pkt_audio, cfg).map(|p| p.payload)
+}
+
+/// Produces diagnostics for one passband packet window.
+///
+/// Parameters:
+/// - `pkt_audio`: passband packet waveform window.
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `PassbandDiagnostics`: sync/CFO/equalization diagnostics.
+pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> PassbandDiagnostics {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return PassbandDiagnostics {
+            enough_samples: false,
+            sync_off: 0,
+            cfo_hz: 0.0,
+            train_rms: 0.0,
+            hest_mag_min: 0.0,
+            hest_mag_mean: 0.0,
+            hest_mag_max: 0.0,
+            decoded: false,
+            decoded_payload_len: None,
+        };
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb = &rbb_full[pre..];
+    let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
+    let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    let rbb_sync = &rbb[sync_off..];
+    let cfo_hz = estimate_coarse_cfo_hz(rbb_sync, cfg);
+    let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+
+    let (used_bins, _pilot_bins, _data_bins) = ofdm_bin_plan(cfg);
+    let xsync_len = 2 * cfg.sync_half_len;
+    let train_len = cfg.nfft + cfg.ncp;
+    if rbb_cfo.len() < xsync_len + train_len || used_bins.is_empty() {
+        return PassbandDiagnostics {
+            enough_samples: false,
+            sync_off,
+            cfo_hz,
+            train_rms: 0.0,
+            hest_mag_min: 0.0,
+            hest_mag_mean: 0.0,
+            hest_mag_max: 0.0,
+            decoded: false,
+            decoded_payload_len: None,
+        };
+    }
+
+    let train_start = xsync_len;
+    let train_no_cp = &rbb_cfo[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
+    let train_rms = (train_no_cp.iter().map(|v| v.norm_sqr()).sum::<f32>() / (train_no_cp.len() as f32)).sqrt();
+    let ytrain = fft(train_no_cp);
+    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
+    let mut mags = Vec::with_capacity(used_bins.len());
+    for (k, &bin) in used_bins.iter().enumerate() {
+        let h = ytrain[bin] / train_known[k];
+        mags.push(h.norm());
+    }
+    let hest_mag_min = mags.iter().copied().fold(f32::INFINITY, f32::min);
+    let hest_mag_max = mags.iter().copied().fold(0.0f32, f32::max);
+    let hest_mag_mean = mags.iter().sum::<f32>() / (mags.len() as f32);
+    let decoded = decode_packet_info_baseband(&rbb_cfo, cfg);
+
+    PassbandDiagnostics {
+        enough_samples: true,
+        sync_off,
+        cfo_hz,
+        train_rms,
+        hest_mag_min,
+        hest_mag_mean,
+        hest_mag_max,
+        decoded: decoded.is_some(),
+        decoded_payload_len: decoded.map(|p| p.payload.len()),
+    }
 }
 
 /// Encodes one packet into passband samples (wake + guard + OFDM body).
@@ -294,10 +388,16 @@ fn decode_packet_from_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Pa
     chunk.extend_from_slice(passband);
     let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
     let rbb = &rbb_full[pre..];
-    let sync_off = find_repeated_half_sync_offset(rbb, cfg);
-    let rbb_sync = &rbb[sync_off..];
-    let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
-    decode_packet_info_baseband(&rbb_cfo, cfg)
+    let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
+    let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    for off in [sync_off, coarse_sync_off] {
+        let rbb_sync = &rbb[off..];
+        let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+        if let Some(pkt) = decode_packet_info_baseband(&rbb_cfo, cfg) {
+            return Some(pkt);
+        }
+    }
+    None
 }
 
 /// Finds sync start using Schmidl-Cox metric on repeated-half preamble.
@@ -347,6 +447,57 @@ fn find_repeated_half_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig) -> usize 
         .unwrap_or(0)
 }
 
+/// Refines timing around the coarse Schmidl-Cox estimate.
+///
+/// Parameters:
+/// - `rbb`: baseband complex samples near packet start.
+/// - `cfg`: modem configuration.
+/// - `coarse_off`: coarse sync offset.
+/// Returns:
+/// - `usize`: refined sync offset.
+fn refine_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig, coarse_off: usize) -> usize {
+    let search = (cfg.ncp / 8).clamp(2, 8);
+    let start = coarse_off.saturating_sub(search);
+    let stop = coarse_off.saturating_add(search).min(rbb.len().saturating_sub(1));
+    let mut best_off = coarse_off;
+    let mut best_score = training_cp_score(&rbb[coarse_off..], cfg);
+    for off in start..=stop {
+        let score = training_cp_score(&rbb[off..], cfg);
+        if score > best_score + 1e-4 {
+            best_score = score;
+            best_off = off;
+        }
+    }
+    best_off
+}
+
+/// Scores one timing hypothesis using the training-symbol CP match.
+///
+/// Parameters:
+/// - `rbb`: baseband samples starting at a sync hypothesis.
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `f32`: normalized CP correlation score.
+fn training_cp_score(rbb: &[Complex32], cfg: &OfdmConfig) -> f32 {
+    let xsync_len = 2 * cfg.sync_half_len;
+    let train_end = xsync_len + cfg.ncp + cfg.nfft;
+    if rbb.len() < train_end || cfg.ncp == 0 || cfg.nfft == 0 {
+        return -1.0;
+    }
+    let cp = &rbb[xsync_len..xsync_len + cfg.ncp];
+    let tail = &rbb[xsync_len + cfg.nfft..xsync_len + cfg.nfft + cfg.ncp];
+    let mut num = Complex32::new(0.0, 0.0);
+    let mut e1 = 0.0f32;
+    let mut e2 = 0.0f32;
+    for k in 0..cfg.ncp {
+        num += cp[k].conj() * tail[k];
+        e1 += cp[k].norm_sqr();
+        e2 += tail[k].norm_sqr();
+    }
+    let den = (e1 * e2).sqrt().max(1e-9);
+    num.norm() / den
+}
+
 /// Applies coarse CFO correction from the repeated-half sync preamble.
 ///
 /// Parameters:
@@ -368,6 +519,19 @@ fn coarse_cfo_correct(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<Complex32> {
         .enumerate()
         .map(|(n, &x)| x * Complex32::from_polar(1.0, -(n as f32) * ph_inc))
         .collect()
+}
+
+fn estimate_coarse_cfo_hz(rbb: &[Complex32], cfg: &OfdmConfig) -> f32 {
+    let l = cfg.sync_half_len;
+    if l == 0 || rbb.len() < 2 * l {
+        return 0.0;
+    }
+    let mut p = Complex32::new(0.0, 0.0);
+    for n in 0..l {
+        p += rbb[n].conj() * rbb[n + l];
+    }
+    let ph_inc = p.arg() / (l as f32);
+    ph_inc * cfg.fs / (2.0 * std::f32::consts::PI)
 }
 
 /// Maps bits to complex symbols for the selected modulation.

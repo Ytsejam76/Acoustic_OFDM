@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use acoustic_ofdm::{
+    diagnose_passband_window,
     decode_single_packet_passband,
     encode_single_packet_passband,
     load_wav_mono_f32,
@@ -64,10 +65,11 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("      [--rand-echo-gain-min G] [--rand-echo-gain-max G] [--seed N]");
     eprintln!("      [--no-channel] <payload_text|stdin>");
     eprintln!("  acoustic_ofdm_cli tx [--base-freq-hz HZ] [--spk-gain GAIN] [--pre-delay-sec SEC]");
-    eprintln!("      [--repeats N] [--gap-sec SEC] [--wake-preamble MODE] [--verbose] <payload_text|stdin>");
+    eprintln!("      [--repeats N] [--gap-sec SEC] [--wake-preamble MODE] [--oracle] [--verbose]");
+    eprintln!("      [<payload_text|stdin>]");
     eprintln!("  acoustic_ofdm_cli rx [--base-freq-hz HZ] [--duration-sec SEC] [--mic-gain GAIN]");
     eprintln!("      [--in-hp-hz HZ] [--in-lp-hz HZ] [--no-input-filter] [--wake-preamble MODE]");
-    eprintln!("      [--dump-wav PATH] [--stdout] [--verbose]");
+    eprintln!("      [--dump-wav PATH] [--oracle] [--stdout] [--verbose]");
     eprintln!();
     eprintln!("Common options:");
     eprintln!("  --base-freq-hz HZ   OFDM base subcarrier frequency in Hz (encode/decode/roundtrip).");
@@ -91,9 +93,10 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  --repeats N         Number of repeated TX bursts (default: 3).");
     eprintln!("  --gap-sec SEC       Silence gap between TX bursts (default: 0.35).");
     eprintln!("  --wake-preamble MODE Wake preamble mode: gold|pn|chirp|tone (default: gold).");
+    eprintln!("  --oracle            Use the built-in fixed payload for live-audio debugging.");
     eprintln!("  --in-hp-hz HZ       RX high-pass cutoff in Hz (default: 12000).");
     eprintln!("  --in-lp-hz HZ       RX low-pass cutoff in Hz (default: 19000).");
-    eprintln!("  --no-input-filter   Disable RX input filtering.");
+    eprintln!("  --no-input-filter   Disable RX input filtering (default: already off).");
     eprintln!("  --dump-wav PATH     Save captured RX audio to a mono WAV file.");
     eprintln!("  --verbose           Print extra diagnostics (especially for rx).");
     eprintln!();
@@ -106,6 +109,7 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  acoustic_ofdm_cli codec-loop --echo 1.0:0.4 --echo 2.2:0.2 \"hello\"");
     eprintln!("  acoustic_ofdm_cli codec-loop --rand-echo-count 3 --rand-echo-max-ms 2.5 \"hello\"");
     eprintln!("  acoustic_ofdm_cli tx --spk-gain 0.8 --repeats 2 --wake-preamble gold \"hello\"");
+    eprintln!("  acoustic_ofdm_cli tx --oracle --repeats 2 --spk-gain 0.2");
     eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --wake-preamble gold --dump-wav /tmp/rx.wav --verbose");
     std::process::exit(code);
 }
@@ -128,8 +132,11 @@ struct AudioOpts {
     input_hp_hz: f32,
     input_lp_hz: f32,
     dump_wav: Option<String>,
+    oracle: bool,
     verbose: bool,
 }
+
+const ORACLE_PAYLOAD: &[u8] = b"ACOUSTIC-OFDM-ORACLE";
 
 /// Channel options used by `codec-loop`.
 ///
@@ -253,10 +260,11 @@ fn parse_tx_args(
         pre_delay_sec: 0.2,
         repeats: 3,
         gap_sec: 0.35,
-        input_filter: true,
+        input_filter: false,
         input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
         dump_wav: None,
+        oracle: false,
         verbose: false,
     };
     let mut payload_arg: Option<String> = None;
@@ -277,6 +285,10 @@ fn parse_tx_args(
             }
             "--wake-preamble" => {
                 i = parse_wake_preamble_opt(cfg, args, i)?;
+            }
+            "--oracle" => {
+                opts.oracle = true;
+                i += 1;
             }
             "--mic-gain" => {
                 if i + 1 >= args.len() {
@@ -327,8 +339,12 @@ fn parse_tx_args(
             }
         }
     }
-    let payload_s = payload_arg.ok_or("tx requires <payload_text|stdin>")?;
-    let payload = payload_from_arg_or_stdin(&payload_s)?;
+    let payload = if opts.oracle {
+        ORACLE_PAYLOAD.to_vec()
+    } else {
+        let payload_s = payload_arg.ok_or("tx requires <payload_text|stdin>")?;
+        payload_from_arg_or_stdin(&payload_s)?
+    };
     if payload.is_empty() {
         return Err("payload must not be empty".into());
     }
@@ -362,10 +378,11 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
         pre_delay_sec: 0.2,
         repeats: 3,
         gap_sec: 0.35,
-        input_filter: true,
+        input_filter: false,
         input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
         dump_wav: None,
+        oracle: false,
         verbose: false,
     };
     let mut stdout_raw = false;
@@ -386,6 +403,10 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
             }
             "--wake-preamble" => {
                 i = parse_wake_preamble_opt(cfg, args, i)?;
+            }
+            "--oracle" => {
+                opts.oracle = true;
+                i += 1;
             }
             "--stdout" => {
                 stdout_raw = true;
@@ -639,96 +660,44 @@ fn f32_to_u16(x: f32) -> u16 {
     (((y + 1.0) * 0.5) * (u16::MAX as f32)) as u16
 }
 
-/// One biquad IIR section (transposed direct form II).
-///
-/// Parameters:
-/// - none.
-/// Returns:
-/// - `Biquad`: zero-initialized section.
-#[derive(Clone, Debug)]
-struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    z1: f32,
-    z2: f32,
-}
-
-impl Biquad {
-    /// Processes one sample.
-    ///
-    /// Parameters:
-    /// - `x`: input sample.
-    /// Returns:
-    /// - `f32`: output sample.
-    fn process(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.z1;
-        self.z1 = self.b1 * x - self.a1 * y + self.z2;
-        self.z2 = self.b2 * x - self.a2 * y;
-        y
+fn sinc(x: f32) -> f32 {
+    if x.abs() < 1e-6 {
+        1.0
+    } else {
+        (std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x)
     }
 }
 
-/// Designs a biquad low-pass section.
-///
-/// Parameters:
-/// - `fs`: sample rate in Hz.
-/// - `f0`: cutoff in Hz.
-/// - `q`: quality factor.
-/// Returns:
-/// - `Biquad`: low-pass section.
-fn biquad_lowpass(fs: f32, f0: f32, q: f32) -> Biquad {
-    let w0 = 2.0 * std::f32::consts::PI * (f0 / fs);
-    let c = w0.cos();
-    let s = w0.sin();
-    let alpha = s / (2.0 * q.max(1e-6));
-    let b0 = (1.0 - c) * 0.5;
-    let b1 = 1.0 - c;
-    let b2 = (1.0 - c) * 0.5;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * c;
-    let a2 = 1.0 - alpha;
-    Biquad {
-        b0: b0 / a0,
-        b1: b1 / a0,
-        b2: b2 / a0,
-        a1: a1 / a0,
-        a2: a2 / a0,
-        z1: 0.0,
-        z2: 0.0,
+fn fir_bandpass(len: usize, f_lo_hz: f32, f_hi_hz: f32, fs: f32) -> Vec<f32> {
+    let len = len.max(3) | 1;
+    let m = (len - 1) as f32 * 0.5;
+    let fl = (f_lo_hz / fs).clamp(0.0, 0.49);
+    let fh = (f_hi_hz / fs).clamp((fl + 1.0 / fs).min(0.49), 0.49);
+    let mut h = Vec::with_capacity(len);
+    for n in 0..len {
+        let x = (n as f32) - m;
+        let ideal = 2.0 * fh * sinc(2.0 * fh * x) - 2.0 * fl * sinc(2.0 * fl * x);
+        let w = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * (n as f32) / ((len - 1) as f32)).cos();
+        h.push(ideal * w);
     }
+    let sum = h.iter().sum::<f32>().abs().max(1e-9);
+    for v in &mut h {
+        *v /= sum;
+    }
+    h
 }
 
-/// Designs a biquad high-pass section.
-///
-/// Parameters:
-/// - `fs`: sample rate in Hz.
-/// - `f0`: cutoff in Hz.
-/// - `q`: quality factor.
-/// Returns:
-/// - `Biquad`: high-pass section.
-fn biquad_highpass(fs: f32, f0: f32, q: f32) -> Biquad {
-    let w0 = 2.0 * std::f32::consts::PI * (f0 / fs);
-    let c = w0.cos();
-    let s = w0.sin();
-    let alpha = s / (2.0 * q.max(1e-6));
-    let b0 = (1.0 + c) * 0.5;
-    let b1 = -(1.0 + c);
-    let b2 = (1.0 + c) * 0.5;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * c;
-    let a2 = 1.0 - alpha;
-    Biquad {
-        b0: b0 / a0,
-        b1: b1 / a0,
-        b2: b2 / a0,
-        a1: a1 / a0,
-        a2: a2 / a0,
-        z1: 0.0,
-        z2: 0.0,
+fn fir_filter(x: &[f32], h: &[f32]) -> Vec<f32> {
+    let mut y = vec![0.0f32; x.len()];
+    for n in 0..x.len() {
+        let mut acc = 0.0f32;
+        let kmax = (n + 1).min(h.len());
+        for k in 0..kmax {
+            acc += x[n - k] * h[k];
+        }
+        y[n] = acc;
     }
+    y
 }
 
 /// Builds input stream and pushes mono frames into ring buffer.
@@ -1061,6 +1030,9 @@ fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<
     println!("Output device: {}", out_dev.name()?);
     println!("Stream config: {} Hz, out {:?}", out_cfg.sample_rate().0, out_cfg.sample_format());
     println!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
+    if opts.oracle {
+        println!("Oracle mode: enabled ({} bytes)", payload.len());
+    }
     println!("Transmit samples: {}", tx.len());
     if opts.verbose {
         let tx_dur = (tx.len() as f32) / cfg_rt.fs;
@@ -1147,14 +1119,8 @@ fn filter_for_sync_detection(
     }
     let hp = hp_hz.clamp(10.0, 0.45 * fs);
     let lp = lp_hz.clamp((hp + 10.0).min(0.49 * fs), 0.49 * fs);
-    let mut hp_bq = biquad_highpass(fs, hp, 0.707);
-    let mut lp_bq = biquad_lowpass(fs, lp, 0.707);
-    let mut y = Vec::with_capacity(x.len());
-    for &s in x {
-        let v = lp_bq.process(hp_bq.process(s));
-        y.push(v);
-    }
-    y
+    let h = fir_bandpass(129, hp, lp, fs);
+    fir_filter(x, &h)
 }
 
 /// Generates a deterministic bipolar PN sequence.
@@ -1304,6 +1270,69 @@ fn wake_candidates(
     filtered
 }
 
+fn sample_linear(x: &[f32], pos: f32) -> f32 {
+    if x.is_empty() || pos < 0.0 {
+        return 0.0;
+    }
+    let i0 = pos.floor() as usize;
+    if i0 >= x.len() {
+        return 0.0;
+    }
+    let i1 = (i0 + 1).min(x.len() - 1);
+    let a = pos - (i0 as f32);
+    x[i0] * (1.0 - a) + x[i1] * a
+}
+
+fn fractional_wake_score(rx: &[f32], wake: &[f32], start: f32) -> f32 {
+    if wake.is_empty() {
+        return 0.0;
+    }
+    let w_energy = wake.iter().map(|v| v * v).sum::<f32>().max(1e-12);
+    let mut dot = 0.0f32;
+    let mut e = 0.0f32;
+    for (k, &wk) in wake.iter().enumerate() {
+        let s = sample_linear(rx, start + (k as f32));
+        dot += s * wk;
+        e += s * s;
+    }
+    dot.abs() / (e.sqrt().max(1e-12) * w_energy.sqrt())
+}
+
+fn refine_wake_candidates_fractional(
+    rx: &[f32],
+    wake: &[f32],
+    cands: &[(usize, f32)],
+) -> Vec<(usize, f32)> {
+    let mut refined = Vec::with_capacity(cands.len());
+    for (idx, base_score) in cands {
+        let mut best_pos = *idx as f32;
+        let mut best_score = *base_score;
+        for di in -2..=2 {
+            for frac_q in 0..4 {
+                let pos = (*idx as f32) + (di as f32) + 0.25 * (frac_q as f32);
+                if pos < 0.0 {
+                    continue;
+                }
+                let score = fractional_wake_score(rx, wake, pos);
+                if score > best_score {
+                    best_score = score;
+                    best_pos = pos;
+                }
+            }
+        }
+        refined.push((best_pos.round().max(0.0) as usize, best_score));
+    }
+    refined.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut dedup = Vec::with_capacity(refined.len());
+    for (idx, sc) in refined {
+        if dedup.iter().any(|(j, _)| idx.abs_diff(*j) < 4) {
+            continue;
+        }
+        dedup.push((idx, sc));
+    }
+    dedup
+}
+
 /// Estimates one packet waveform length in passband samples.
 ///
 /// Parameters:
@@ -1342,7 +1371,8 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
     }
     let wake = make_wake_ref(cfg);
     let step = ((cfg.fs * 0.001).round() as usize).max(1);
-    let cands = wake_candidates(rx_sync, &wake, step, 6, est_pkt);
+    let cands0 = wake_candidates(rx_sync, &wake, step, 6, est_pkt);
+    let cands = refine_wake_candidates_fractional(rx_sync, &wake, &cands0);
     for (idx, _) in cands.iter().take(4) {
         let off = *idx;
         let end = off.saturating_add(est_pkt + pad).min(rx_raw.len());
@@ -1377,6 +1407,22 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
     None
 }
 
+fn print_passband_diagnostics(label: &str, pkt_audio: &[f32], cfg: &OfdmConfig) {
+    let d = diagnose_passband_window(pkt_audio, cfg);
+    println!(
+        "{}: enough={} sync_off={} cfo={:.1}Hz train_rms={:.4} hest[min/mean/max]=[{:.3}/{:.3}/{:.3}] decoded={}",
+        label,
+        d.enough_samples,
+        d.sync_off,
+        d.cfo_hz,
+        d.train_rms,
+        d.hest_mag_min,
+        d.hest_mag_mean,
+        d.hest_mag_max,
+        d.decoded
+    );
+}
+
 /// Runs `rx`: captures from microphone and attempts OFDM sync+decode.
 ///
 /// Parameters:
@@ -1409,6 +1455,9 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     println!("Stream config: {} Hz, in {:?}", in_cfg.sample_rate().0, in_cfg.sample_format());
     println!("RX detector: wake-correlation-v2");
     println!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());
+    if opts.oracle {
+        println!("Oracle mode: enabled (expect {} bytes)", ORACLE_PAYLOAD.len());
+    }
     println!(
         "RX sync filter: {} (hp={:.1}Hz, lp={:.1}Hz)",
         if opts.input_filter { "on" } else { "off" },
@@ -1433,6 +1482,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     t0.elapsed().as_secs_f32(),
                     bytes.len()
                 );
+                if opts.oracle {
+                    println!(
+                        "Oracle verdict: {}",
+                        if bytes.as_slice() == ORACLE_PAYLOAD { "match" } else { "mismatch" }
+                    );
+                }
                 if stdout_raw {
                     let mut out = std::io::stdout().lock();
                     out.write_all(&bytes)?;
@@ -1520,7 +1575,8 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     if dec.is_none() {
         let wake = make_wake_ref(&cfg_rt);
         let coarse_step = ((cfg_rt.fs * 0.0005).round() as usize).max(1);
-        let cands = wake_candidates(&rx_sync, &wake, coarse_step, 12, est_pkt);
+        let cands0 = wake_candidates(&rx_sync, &wake, coarse_step, 12, est_pkt);
+        let cands = refine_wake_candidates_fractional(&rx_sync, &wake, &cands0);
         if opts.verbose {
             println!(
                 "Wake search: {} candidates (step={} samples)",
@@ -1535,6 +1591,13 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     (*idx as f32) / cfg_rt.fs,
                     sc
                 );
+            }
+            for (i, (idx, _)) in cands.iter().take(3).enumerate() {
+                let off = *idx;
+                let end = off.saturating_add(est_pkt + pad).min(rx.len());
+                if end > off + cfg_rt.nfft + cfg_rt.ncp {
+                    print_passband_diagnostics(&format!("  cand {:2} diag", i + 1), &rx[off..end], &cfg_rt);
+                }
             }
         }
         let back = ((cfg_rt.fs * 0.010).round() as isize).max(1);
@@ -1645,6 +1708,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     match dec {
         Some(bytes) => {
             println!("Decode: OK ({} bytes)", bytes.len());
+            if opts.oracle {
+                println!(
+                    "Oracle verdict: {}",
+                    if bytes.as_slice() == ORACLE_PAYLOAD { "match" } else { "mismatch" }
+                );
+            }
             if stdout_raw {
                 let mut out = std::io::stdout().lock();
                 out.write_all(&bytes)?;
@@ -1804,6 +1873,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         apply_cli_overrides, parse_codec_loop_args, parse_rx_args, parse_tx_args, payload_from_arg,
+        ORACLE_PAYLOAD,
     };
     use acoustic_ofdm::{OfdmConfig, WakePreamble};
 
@@ -1928,6 +1998,22 @@ mod tests {
         assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
         assert!(o.verbose);
         assert_eq!(payload, b"hello");
+    }
+
+    /// Ensures TX oracle mode does not require an explicit payload.
+    ///
+    /// Parameters:
+    /// - none.
+    /// Returns:
+    /// - none.
+    #[test]
+    fn parse_tx_oracle_options() {
+        let mut cfg = OfdmConfig::default();
+        let args = vec!["--oracle".to_string(), "--repeats".to_string(), "2".to_string()];
+        let (o, payload) = parse_tx_args(&mut cfg, &args).expect("parse failed");
+        assert!(o.oracle);
+        assert_eq!(o.repeats, 2);
+        assert_eq!(payload, ORACLE_PAYLOAD);
     }
 
     /// Ensures codec-loop parser handles iterations and payload.

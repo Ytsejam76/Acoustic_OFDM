@@ -72,7 +72,7 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("      [<payload_text|stdin>]");
     eprintln!("  acoustic_ofdm_cli rx [--base-freq-hz HZ] [--duration-sec SEC] [--mic-gain GAIN]");
     eprintln!("      [--in-hp-hz HZ] [--in-lp-hz HZ] [--no-input-filter] [--wake-preamble MODE]");
-    eprintln!("      [--dump-wav PATH] [--spectrogram] [--oracle] [--stdout] [--verbose]");
+    eprintln!("      [--dump-wav PATH] [--spectrogram] [--spectrogram-path PATH] [--oracle] [--stdout] [--verbose]");
     eprintln!();
     eprintln!("Common options:");
     eprintln!("  --base-freq-hz HZ   OFDM base subcarrier frequency in Hz (encode/decode/roundtrip).");
@@ -101,7 +101,8 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  --in-lp-hz HZ       RX low-pass cutoff in Hz (default: 19000).");
     eprintln!("  --no-input-filter   Disable RX input filtering (default: already off).");
     eprintln!("  --dump-wav PATH     Save captured RX audio to a mono WAV file.");
-    eprintln!("  --spectrogram       Save /tmp/rx_spectrogram.png during verbose/live RX debugging.");
+    eprintln!("  --spectrogram       Save a spectrogram PNG during live RX debugging.");
+    eprintln!("  --spectrogram-path PATH  Spectrogram PNG path (default: /tmp/rx_spectrogram.png).");
     eprintln!("  --verbose           Print extra diagnostics (especially for rx).");
     eprintln!();
     eprintln!("Examples:");
@@ -114,7 +115,7 @@ fn usage_and_exit(code: i32) -> ! {
     eprintln!("  acoustic_ofdm_cli codec-loop --rand-echo-count 3 --rand-echo-max-ms 2.5 \"hello\"");
     eprintln!("  acoustic_ofdm_cli tx --spk-gain 0.8 --repeats 2 --wake-preamble gold \"hello\"");
     eprintln!("  acoustic_ofdm_cli tx --oracle --repeats 2 --spk-gain 0.2");
-    eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --wake-preamble gold --dump-wav /tmp/rx.wav --spectrogram --verbose");
+    eprintln!("  acoustic_ofdm_cli rx --duration-sec 6 --wake-preamble gold --dump-wav /tmp/rx.wav --spectrogram --spectrogram-path /tmp/rx_spec.png --verbose");
     std::process::exit(code);
 }
 
@@ -137,6 +138,7 @@ struct AudioOpts {
     input_lp_hz: f32,
     dump_wav: Option<String>,
     spectrogram: bool,
+    spectrogram_path: String,
     oracle: bool,
     verbose: bool,
 }
@@ -270,6 +272,7 @@ fn parse_tx_args(
         input_lp_hz: 19_000.0,
         dump_wav: None,
         spectrogram: false,
+        spectrogram_path: "/tmp/rx_spectrogram.png".to_string(),
         oracle: false,
         verbose: false,
     };
@@ -389,6 +392,7 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
         input_lp_hz: 19_000.0,
         dump_wav: None,
         spectrogram: false,
+        spectrogram_path: "/tmp/rx_spectrogram.png".to_string(),
         oracle: false,
         verbose: false,
     };
@@ -461,6 +465,13 @@ fn parse_rx_args(cfg: &mut OfdmConfig, args: &[String]) -> Result<(AudioOpts, bo
             "--spectrogram" => {
                 opts.spectrogram = true;
                 i += 1;
+            }
+            "--spectrogram-path" => {
+                if i + 1 >= args.len() {
+                    return Err("--spectrogram-path requires a value".into());
+                }
+                opts.spectrogram_path = args[i + 1].clone();
+                i += 2;
             }
             "--verbose" => {
                 opts.verbose = true;
@@ -1692,7 +1703,7 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         save_wav_mono_i16(Path::new(path), &rx, cfg_rt.fs.round() as u32)?;
         println!("Saved RX capture: {}", path);
         if opts.spectrogram {
-            let spec_path = Path::new("/tmp/rx_spectrogram.png");
+            let spec_path = Path::new(&opts.spectrogram_path);
             save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
             println!("Saved spectrogram PNG: {}", spec_path.display());
         }
@@ -2147,12 +2158,17 @@ mod tests {
             "tone".to_string(),
             "--dump-wav".to_string(),
             "/tmp/rx.wav".to_string(),
+            "--spectrogram".to_string(),
+            "--spectrogram-path".to_string(),
+            "/tmp/rx_spec.png".to_string(),
             "--verbose".to_string(),
         ];
         let (o, stdout_raw) = parse_rx_args(&mut cfg, &args).expect("parse failed");
         assert!((o.duration_sec - 2.5).abs() < 1e-6);
         assert!((o.mic_gain - 0.8).abs() < 1e-6);
         assert_eq!(o.dump_wav.as_deref(), Some("/tmp/rx.wav"));
+        assert!(o.spectrogram);
+        assert_eq!(o.spectrogram_path, "/tmp/rx_spec.png");
         assert_eq!(cfg.wake_preamble, WakePreamble::Tone);
         assert!(o.verbose);
         assert!(!stdout_raw);

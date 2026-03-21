@@ -9,7 +9,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-image = "0.25"
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder"] }
 rustfft = "6"
 hound = "3"
 

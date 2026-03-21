@@ -82,7 +82,7 @@ impl Default for OfdmConfig {
             use_chirp_sync: true,
             sync_chirp_f0: 4_000.0,
             sync_chirp_f1: 8_000.0,
-            sync_half_len: 64,
+            sync_half_len: 6_000,
             packet_payload_bytes: 24,
             session_id: 1234,
         }

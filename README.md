@@ -95,7 +95,7 @@ Over-the-air modem test (`tx` sends encoded packet, `rx` listens and decodes):
 cargo run -p acoustic_ofdm_cli -- rx --duration-sec 6 --verbose
 
 # terminal 2
-cargo run -p acoustic_ofdm_cli -- tx --spk-gain 0.8 "hello-ofdm"
+cargo run -p acoustic_ofdm_cli -- tx --spk-gain 0.8 --repeats 4 --pre-delay-sec 0.5 "hello-ofdm"
 ```
 
 Note: this binary uses `cpal`, which on Linux typically runs through ALSA

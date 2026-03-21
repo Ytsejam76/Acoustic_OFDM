@@ -294,7 +294,76 @@ fn decode_packet_from_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Pa
     chunk.extend_from_slice(passband);
     let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
     let rbb = &rbb_full[pre..];
-    decode_packet_info_baseband(rbb, cfg)
+    let sync_off = find_repeated_half_sync_offset(rbb, cfg);
+    let rbb_sync = &rbb[sync_off..];
+    let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+    decode_packet_info_baseband(&rbb_cfo, cfg)
+}
+
+/// Finds sync start using Schmidl-Cox metric on repeated-half preamble.
+///
+/// Parameters:
+/// - `rbb`: baseband complex samples near packet start.
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `usize`: estimated sync start offset in samples (relative to `rbb`).
+fn find_repeated_half_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig) -> usize {
+    let l = cfg.sync_half_len;
+    if l == 0 || rbb.len() < 2 * l + 2 {
+        return 0;
+    }
+    // Search only near the expected start; wake detection should already be close.
+    let max_search = ((0.12 * cfg.fs).round() as usize).min(rbb.len().saturating_sub(2 * l + 1));
+    if max_search == 0 {
+        return 0;
+    }
+
+    // v[n] = conj(r[n]) * r[n+L], e[n] = |r[n+L]|^2
+    let n_terms = max_search + l;
+    let mut pref_v = vec![Complex32::new(0.0, 0.0); n_terms + 1];
+    let mut pref_e = vec![0.0f32; n_terms + 1];
+    for n in 0..n_terms {
+        let v = rbb[n].conj() * rbb[n + l];
+        let e = rbb[n + l].norm_sqr();
+        pref_v[n + 1] = pref_v[n] + v;
+        pref_e[n + 1] = pref_e[n] + e;
+    }
+
+    let mut best_d = 0usize;
+    let mut best_m = -1.0f32;
+    for d in 0..=max_search {
+        let p = pref_v[d + l] - pref_v[d];
+        let r = (pref_e[d + l] - pref_e[d]).max(1e-9);
+        let m = p.norm_sqr() / (r * r);
+        if m > best_m {
+            best_m = m;
+            best_d = d;
+        }
+    }
+    best_d
+}
+
+/// Applies coarse CFO correction from the repeated-half sync preamble.
+///
+/// Parameters:
+/// - `rbb`: baseband complex samples starting near sync preamble.
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `Vec<Complex32>`: CFO-corrected baseband samples.
+fn coarse_cfo_correct(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<Complex32> {
+    let l = cfg.sync_half_len;
+    if l == 0 || rbb.len() < 2 * l {
+        return rbb.to_vec();
+    }
+    let mut p = Complex32::new(0.0, 0.0);
+    for n in 0..l {
+        p += rbb[n].conj() * rbb[n + l];
+    }
+    let ph_inc = p.arg() / (l as f32);
+    rbb.iter()
+        .enumerate()
+        .map(|(n, &x)| x * Complex32::from_polar(1.0, -(n as f32) * ph_inc))
+        .collect()
 }
 
 /// Maps bits to complex symbols for the selected modulation.

@@ -1336,6 +1336,79 @@ fn refine_wake_candidates_fractional(
     dedup
 }
 
+fn burst_active_regions(x: &[f32], fs: f32) -> Vec<(usize, usize)> {
+    if x.is_empty() {
+        return Vec::new();
+    }
+    let win = ((0.010 * fs).round() as usize).max(1);
+    let hop = ((0.002 * fs).round() as usize).max(1);
+    if x.len() < win {
+        return vec![(0, x.len())];
+    }
+    let mut sum = x[..win].iter().map(|v| v * v).sum::<f32>();
+    let mut env = Vec::<(usize, f32)>::new();
+    let mut start = 0usize;
+    loop {
+        env.push((start, (sum / (win as f32)).sqrt()));
+        if start + hop + win > x.len() {
+            break;
+        }
+        for k in 0..hop {
+            sum += x[start + win + k] * x[start + win + k] - x[start + k] * x[start + k];
+        }
+        start += hop;
+    }
+    let mut vals = env.iter().map(|(_, e)| *e).collect::<Vec<_>>();
+    vals.sort_by(|a, b| a.total_cmp(b));
+    let noise = vals[vals.len() / 5].max(1e-4);
+    let th = (2.5 * noise).max(noise + 0.015);
+    let min_run = ((0.025 * fs).round() as usize).max(hop);
+    let pre = ((0.020 * fs).round() as usize).max(1);
+    let post = ((0.080 * fs).round() as usize).max(1);
+    let mut runs = Vec::<(usize, usize)>::new();
+    let mut cur: Option<(usize, usize)> = None;
+    for (s, e) in env {
+        let active = e >= th;
+        match (cur, active) {
+            (None, true) => cur = Some((s, s + win)),
+            (Some((a, _)), true) => cur = Some((a, s + win)),
+            (Some((a, b)), false) => {
+                if b.saturating_sub(a) >= min_run {
+                    runs.push((a.saturating_sub(pre), (b + post).min(x.len())));
+                }
+                cur = None;
+            }
+            (None, false) => {}
+        }
+    }
+    if let Some((a, b)) = cur {
+        if b.saturating_sub(a) >= min_run {
+            runs.push((a.saturating_sub(pre), (b + post).min(x.len())));
+        }
+    }
+    let mut merged = Vec::<(usize, usize)>::new();
+    for (a, b) in runs {
+        if let Some(last) = merged.last_mut() {
+            if a <= last.1 {
+                last.1 = last.1.max(b);
+                continue;
+            }
+        }
+        merged.push((a, b));
+    }
+    merged
+}
+
+fn filter_candidates_by_regions(cands: &[(usize, f32)], regions: &[(usize, usize)]) -> Vec<(usize, f32)> {
+    if regions.is_empty() {
+        return Vec::new();
+    }
+    cands.iter()
+        .copied()
+        .filter(|(idx, _)| regions.iter().any(|(a, b)| *idx >= *a && *idx < *b))
+        .collect()
+}
+
 /// Estimates one packet waveform length in passband samples.
 ///
 /// Parameters:
@@ -1431,7 +1504,9 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
     }
     let wake = make_wake_ref(cfg);
     let step = ((cfg.fs * 0.001).round() as usize).max(1);
-    let cands0 = wake_candidates(rx_sync, &wake, step, 6, est_pkt);
+    let gate = filter_for_sync_detection(rx_raw, cfg.fs, 12_000.0, 19_000.0, true);
+    let regions = burst_active_regions(&gate, cfg.fs);
+    let cands0 = filter_candidates_by_regions(&wake_candidates(rx_sync, &wake, step, 6, est_pkt), &regions);
     let cands = refine_wake_candidates_fractional(rx_sync, &wake, &cands0);
     for (idx, _) in cands.iter().take(4) {
         let off = *idx;
@@ -1656,7 +1731,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     if dec.is_none() {
         let wake = make_wake_ref(&cfg_rt);
         let coarse_step = ((cfg_rt.fs * 0.0005).round() as usize).max(1);
-        let cands0 = wake_candidates(&rx_sync, &wake, coarse_step, 12, est_pkt);
+        let gate = filter_for_sync_detection(&rx, cfg_rt.fs, 12_000.0, 19_000.0, true);
+        let active_regions = burst_active_regions(&gate, cfg_rt.fs);
+        let cands0 = filter_candidates_by_regions(
+            &wake_candidates(&rx_sync, &wake, coarse_step, 12, est_pkt),
+            &active_regions,
+        );
         let cands = refine_wake_candidates_fractional(&rx_sync, &wake, &cands0);
         let mut ranked_cands: Vec<(usize, f32, f32, bool)> = Vec::new();
         for (idx, wake_score) in cands.iter().copied().take(8) {
@@ -1676,9 +1756,10 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         });
         if opts.verbose {
             println!(
-                "Wake search: {} candidates (step={} samples)",
+                "Wake search: {} candidates (step={} samples, active_regions={})",
                 cands.len(),
-                coarse_step
+                coarse_step,
+                active_regions.len()
             );
             for (i, (idx, sc)) in cands.iter().enumerate() {
                 println!(

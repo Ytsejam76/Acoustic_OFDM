@@ -19,8 +19,11 @@ use acoustic_ofdm::{
     load_wav_mono_f32,
     save_constellation_comparison_png,
     save_spectrogram_png,
+    save_spectrogram_png_with_options,
     save_wav_mono_i16,
     OfdmConfig,
+    SpectrogramOptions,
+    SpectrogramWindow,
     WakePreamble,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -40,6 +43,25 @@ enum WakePreambleArg {
     Tone,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum SpectrogramWindowArg {
+    Hann,
+    Hamming,
+    Blackman,
+    Rect,
+}
+
+impl From<SpectrogramWindowArg> for SpectrogramWindow {
+    fn from(value: SpectrogramWindowArg) -> Self {
+        match value {
+            SpectrogramWindowArg::Hann => SpectrogramWindow::Hann,
+            SpectrogramWindowArg::Hamming => SpectrogramWindow::Hamming,
+            SpectrogramWindowArg::Blackman => SpectrogramWindow::Blackman,
+            SpectrogramWindowArg::Rect => SpectrogramWindow::Rect,
+        }
+    }
+}
+
 impl From<WakePreambleArg> for WakePreamble {
     fn from(value: WakePreambleArg) -> Self {
         match value {
@@ -53,9 +75,11 @@ impl From<WakePreambleArg> for WakePreamble {
 
 #[derive(Debug, Clone, Args, Default)]
 struct CommonCfgArgs {
-    #[arg(long)]
+    /// Shift the active OFDM bins so the first used bin starts near this frequency in Hz.
+    #[arg(short = 'b', long)]
     base_freq_hz: Option<f32>,
-    #[arg(long, value_enum)]
+    /// Wake preamble family used for coarse packet acquisition.
+    #[arg(short = 'w', long, value_enum)]
     wake_preamble: Option<WakePreambleArg>,
 }
 
@@ -81,7 +105,9 @@ enum Commands {
 struct EncodeCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
+    /// Output WAV path for the generated passband burst.
     out_wav: String,
+    /// UTF-8 payload text to encode.
     payload_text: String,
 }
 
@@ -89,8 +115,10 @@ struct EncodeCmd {
 struct DecodeCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long)]
+    /// Write decoded payload bytes directly to stdout.
+    #[arg(short = 's', long)]
     stdout: bool,
+    /// Input WAV path to decode.
     in_wav: String,
 }
 
@@ -98,9 +126,12 @@ struct DecodeCmd {
 struct RoundtripCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long)]
+    /// Write decoded payload bytes directly to stdout.
+    #[arg(short = 's', long)]
     stdout: bool,
+    /// WAV path to write and decode back.
     wav_path: String,
+    /// UTF-8 payload text to roundtrip.
     payload_text: String,
 }
 
@@ -108,24 +139,34 @@ struct RoundtripCmd {
 struct CodecLoopCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long, default_value_t = 20)]
+    /// Number of encode/channel/decode iterations to run.
+    #[arg(short = 'n', long, default_value_t = 20)]
     iterations: usize,
-    #[arg(long)]
+    /// AWGN SNR in dB for the synthetic channel.
+    #[arg(short = 'S', long)]
     snr_db: Option<f32>,
-    #[arg(long = "echo")]
+    /// Explicit echo specification in MS:GAIN form. Repeat to add more echoes.
+    #[arg(short = 'e', long = "echo")]
     echoes: Vec<String>,
-    #[arg(long, default_value_t = 0)]
+    /// Number of random echoes to synthesize.
+    #[arg(short = 'c', long, default_value_t = 0)]
     rand_echo_count: usize,
+    /// Maximum random echo delay in milliseconds.
     #[arg(long, default_value_t = 3.0)]
     rand_echo_max_ms: f32,
+    /// Minimum random echo gain.
     #[arg(long, default_value_t = 0.05)]
     rand_echo_gain_min: f32,
+    /// Maximum random echo gain.
     #[arg(long, default_value_t = 0.35)]
     rand_echo_gain_max: f32,
-    #[arg(long)]
+    /// RNG seed for repeatable channel generation.
+    #[arg(short = 'r', long)]
     seed: Option<u64>,
-    #[arg(long)]
+    /// Disable channel impairments entirely.
+    #[arg(short = 'N', long)]
     no_channel: bool,
+    /// UTF-8 payload text to loop through the codec.
     payload_text: String,
 }
 
@@ -133,24 +174,34 @@ struct CodecLoopCmd {
 struct TxCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long, value_enum, default_value_t = LiveProfileArg::LiveDebug)]
+    /// TX profile preset.
+    #[arg(short = 'p', long, value_enum, default_value_t = LiveProfileArg::LiveDebug)]
     profile: LiveProfileArg,
-    #[arg(long)]
+    /// Speaker/output gain multiplier.
+    #[arg(short = 'g', long)]
     spk_gain: Option<f32>,
-    #[arg(long)]
+    /// Silence before the first transmission in seconds.
+    #[arg(short = 'd', long)]
     pre_delay_sec: Option<f32>,
-    #[arg(long)]
+    /// Number of repeated transmissions.
+    #[arg(short = 'r', long)]
     repeats: Option<usize>,
-    #[arg(long)]
+    /// Gap between repeated transmissions in seconds.
+    #[arg(short = 'G', long)]
     gap_sec: Option<f32>,
-    #[arg(long)]
+    /// Send the built-in oracle payload instead of custom text.
+    #[arg(short = 'o', long)]
     oracle: bool,
-    #[arg(long)]
+    /// Enable verbose live diagnostics.
+    #[arg(short = 'v', long)]
     verbose: bool,
-    #[arg(long, value_enum)]
+    /// Logger verbosity for terminal/file output.
+    #[arg(short = 'l', long, value_enum)]
     log_level: Option<LogLevelArg>,
-    #[arg(long)]
+    /// Optional path for the TX log file.
+    #[arg(short = 'L', long)]
     log_file: Option<String>,
+    /// Optional UTF-8 payload text. Omit when using --oracle.
     payload_text: Option<String>,
 }
 
@@ -158,33 +209,56 @@ struct TxCmd {
 struct RxCmd {
     #[command(flatten)]
     common: CommonCfgArgs,
-    #[arg(long, value_enum, default_value_t = LiveProfileArg::LiveDebug)]
+    /// RX profile preset.
+    #[arg(short = 'p', long, value_enum, default_value_t = LiveProfileArg::LiveDebug)]
     profile: LiveProfileArg,
-    #[arg(long)]
+    /// Capture duration in seconds.
+    #[arg(short = 'd', long)]
     duration_sec: Option<f32>,
-    #[arg(long)]
+    /// Microphone/input gain multiplier.
+    #[arg(short = 'g', long)]
     mic_gain: Option<f32>,
+    /// High-pass corner for the optional input filter.
     #[arg(long, default_value_t = 12_000.0)]
     in_hp_hz: f32,
+    /// Low-pass corner for the optional input filter.
     #[arg(long, default_value_t = 19_000.0)]
     in_lp_hz: f32,
+    /// Disable the optional input band-pass filter.
     #[arg(long)]
     no_input_filter: bool,
-    #[arg(long)]
+    /// Optional WAV path to save the captured audio.
+    #[arg(short = 'W', long)]
     dump_wav: Option<String>,
-    #[arg(long)]
+    /// Save a spectrogram PNG of the capture.
+    #[arg(short = 's', long)]
     spectrogram: bool,
-    #[arg(long, default_value = "/tmp/rx_spectrogram.png")]
+    /// Output path for the spectrogram PNG.
+    #[arg(short = 'P', long, default_value = "/tmp/rx_spectrogram.png")]
     spectrogram_path: String,
-    #[arg(long)]
+    /// Spectrogram FFT size.
+    #[arg(long, default_value_t = 512)]
+    spectrogram_nfft: usize,
+    /// Spectrogram hop size in samples.
+    #[arg(long, default_value_t = 128)]
+    spectrogram_hop: usize,
+    /// Spectrogram analysis window.
+    #[arg(long, value_enum, default_value_t = SpectrogramWindowArg::Hann)]
+    spectrogram_window: SpectrogramWindowArg,
+    /// Expect and verify the built-in oracle payload.
+    #[arg(short = 'o', long)]
     oracle: bool,
-    #[arg(long)]
+    /// Write decoded payload bytes directly to stdout.
+    #[arg(short = 'S', long)]
     stdout: bool,
-    #[arg(long)]
+    /// Enable verbose live diagnostics.
+    #[arg(short = 'v', long)]
     verbose: bool,
-    #[arg(long, value_enum)]
+    /// Logger verbosity for terminal/file output.
+    #[arg(short = 'l', long, value_enum)]
     log_level: Option<LogLevelArg>,
-    #[arg(long)]
+    /// Optional path for the RX log file.
+    #[arg(short = 'L', long)]
     log_file: Option<String>,
 }
 
@@ -235,6 +309,7 @@ struct AudioOpts {
     dump_wav: Option<String>,
     spectrogram: bool,
     spectrogram_path: String,
+    spectrogram_opts: SpectrogramOptions,
     oracle: bool,
     verbose: bool,
 }
@@ -353,6 +428,11 @@ fn rx_audio_opts(cmd: &RxCmd) -> AudioOpts {
         } else {
             spectrogram_path
         },
+        spectrogram_opts: SpectrogramOptions {
+            nfft: cmd.spectrogram_nfft,
+            hop: cmd.spectrogram_hop,
+            window: cmd.spectrogram_window.into(),
+        },
         oracle: cmd.oracle || oracle,
         verbose: cmd.verbose || verbose || matches!(cmd.log_level, Some(LogLevelArg::Debug | LogLevelArg::Trace)),
     }
@@ -376,6 +456,7 @@ fn tx_audio_opts(cmd: &TxCmd) -> AudioOpts {
         dump_wav: None,
         spectrogram: false,
         spectrogram_path: "/tmp/rx_spectrogram.png".to_string(),
+        spectrogram_opts: SpectrogramOptions::default(),
         oracle: cmd.oracle || oracle,
         verbose: cmd.verbose || verbose || matches!(cmd.log_level, Some(LogLevelArg::Debug | LogLevelArg::Trace)),
     }
@@ -1610,7 +1691,14 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     }
     if opts.spectrogram {
         let spec_path = Path::new(&opts.spectrogram_path);
-        save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
+        if opts.spectrogram_opts.nfft == SpectrogramOptions::default().nfft
+            && opts.spectrogram_opts.hop == SpectrogramOptions::default().hop
+            && opts.spectrogram_opts.window == SpectrogramOptions::default().window
+        {
+            save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
+        } else {
+            save_spectrogram_png_with_options(spec_path, &rx, cfg_rt.fs, opts.spectrogram_opts)?;
+        }
         let spectrogram_path = spec_path.display();
         info_line!("Saved spectrogram PNG: {spectrogram_path}");
     }

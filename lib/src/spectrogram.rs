@@ -6,13 +6,50 @@ use std::path::Path;
 use plotters::prelude::*;
 use rustfft::{num_complex::Complex32, FftPlanner};
 
-fn hann_window(n: usize) -> Vec<f32> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpectrogramWindow {
+    Hann,
+    Hamming,
+    Blackman,
+    Rect,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SpectrogramOptions {
+    pub nfft: usize,
+    pub hop: usize,
+    pub window: SpectrogramWindow,
+}
+
+impl Default for SpectrogramOptions {
+    fn default() -> Self {
+        Self {
+            nfft: 512,
+            hop: 128,
+            window: SpectrogramWindow::Hann,
+        }
+    }
+}
+
+fn window_samples(n: usize, kind: SpectrogramWindow) -> Vec<f32> {
     if n <= 1 {
         return vec![1.0; n.max(1)];
     }
-    (0..n)
-        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32)).cos())
-        .collect()
+    match kind {
+        SpectrogramWindow::Rect => vec![1.0; n],
+        SpectrogramWindow::Hann => (0..n)
+            .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32)).cos())
+            .collect(),
+        SpectrogramWindow::Hamming => (0..n)
+            .map(|i| 0.54 - 0.46 * (2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32)).cos())
+            .collect(),
+        SpectrogramWindow::Blackman => (0..n)
+            .map(|i| {
+                let phi = 2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32);
+                0.42 - 0.5 * phi.cos() + 0.08 * (2.0 * phi).cos()
+            })
+            .collect(),
+    }
 }
 
 fn viridis_like(t: f32) -> RGBColor {
@@ -49,16 +86,25 @@ fn viridis_like(t: f32) -> RGBColor {
 /// Returns:
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` when the PNG is written.
 pub fn save_spectrogram_png(path: &Path, x: &[f32], fs: f32) -> Result<(), Box<dyn Error>> {
+    save_spectrogram_png_with_options(path, x, fs, SpectrogramOptions::default())
+}
+
+pub fn save_spectrogram_png_with_options(
+    path: &Path,
+    x: &[f32],
+    fs: f32,
+    opts: SpectrogramOptions,
+) -> Result<(), Box<dyn Error>> {
     if x.is_empty() {
         return Ok(());
     }
-    let nfft = 512usize;
-    let hop = 128usize;
+    let nfft = opts.nfft.max(16);
+    let hop = opts.hop.max(1).min(nfft);
     if x.len() < nfft {
         return Ok(());
     }
 
-    let window = hann_window(nfft);
+    let window = window_samples(nfft, opts.window);
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(nfft);
     let n_frames = 1 + (x.len() - nfft) / hop;
@@ -125,8 +171,7 @@ pub fn save_spectrogram_png(path: &Path, x: &[f32], fs: f32) -> Result<(), Box<d
     chart.draw_series(cells)?;
 
     legend_area.fill(&RGBColor(245, 245, 240))?;
-    let (lw, lh) = legend_area.dim_in_pixel();
-    let lw = lw as i32;
+    let (_lw, lh) = legend_area.dim_in_pixel();
     let lh = lh as i32;
     let bar_left = 28i32;
     let bar_right = 52i32;
@@ -162,7 +207,7 @@ pub fn save_spectrogram_png(path: &Path, x: &[f32], fs: f32) -> Result<(), Box<d
     }
     legend_area.draw(&Text::new(
         "Power [dB]",
-        (lw - 26, lh / 2),
+        (bar_right + 42, lh / 2),
         ("sans-serif", 18)
             .into_font()
             .transform(FontTransform::Rotate90),

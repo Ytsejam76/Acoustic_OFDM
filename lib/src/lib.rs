@@ -26,7 +26,7 @@ pub use modem::{
     PassbandSyncDump,
 };
 pub use constellation::save_constellation_comparison_png;
-pub use spectrogram::save_spectrogram_png;
+pub use spectrogram::{save_spectrogram_png, save_spectrogram_png_with_options, SpectrogramOptions, SpectrogramWindow};
 pub use wav_io::{load_wav_mono_f32, save_wav_mono_i16};
 
 // vim: set ts=4 sw=4 et:

@@ -1790,6 +1790,16 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                         debug_line!("Saved constellation PNG: {plot_png}");
                     }
                     if let Some(track) = dump_passband_pilot_tracking(&rx[off..end], &cfg_rt) {
+                        for (i, (hmean, hmax)) in track
+                            .hest_mag_mean
+                            .iter()
+                            .zip(track.hest_mag_max.iter())
+                            .take(8)
+                            .enumerate()
+                        {
+                            let train = i + 1;
+                            debug_line!("Channel refresh {train:2}: hest_mean={hmean:.3} hest_max={hmax:.3}");
+                        }
                         for (i, (phase_rad, pilot_evm)) in track
                             .pilot_phase_rad
                             .iter()

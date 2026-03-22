@@ -46,6 +46,8 @@ pub struct PassbandConstellationDump {
 pub struct PassbandPilotTrackDump {
     pub pilot_phase_rad: Vec<f32>,
     pub pilot_evm: Vec<f32>,
+    pub hest_mag_mean: Vec<f32>,
+    pub hest_mag_max: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -509,6 +511,8 @@ pub fn dump_passband_pilot_tracking(
         return Some(PassbandPilotTrackDump {
             pilot_phase_rad: Vec::new(),
             pilot_evm: Vec::new(),
+            hest_mag_mean: Vec::new(),
+            hest_mag_max: Vec::new(),
         });
     }
     let xsync_len = 2 * cfg.sync_half_len;
@@ -532,6 +536,8 @@ pub fn dump_passband_pilot_tracking(
     let mut data_symbol_idx = 0usize;
     let mut pilot_phase_rad = Vec::new();
     let mut pilot_evm = Vec::new();
+    let mut hest_mag_mean = Vec::new();
+    let mut hest_mag_max = Vec::new();
     for (sym_idx, kind) in symbol_plan.into_iter().enumerate() {
         let s0 = data_start + sym_idx * sym_len;
         let s1 = s0 + sym_len;
@@ -541,6 +547,9 @@ pub fn dump_passband_pilot_tracking(
         let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             hest = estimate_channel_from_training(&y, &used_bins, &train_known);
+            let mags = hest.iter().map(|h| h.norm()).collect::<Vec<_>>();
+            hest_mag_mean.push(mags.iter().sum::<f32>() / (mags.len() as f32));
+            hest_mag_max.push(mags.iter().copied().fold(0.0f32, f32::max));
             continue;
         }
         let mut xeq_used = Vec::with_capacity(used_bins.len());
@@ -566,6 +575,8 @@ pub fn dump_passband_pilot_tracking(
     Some(PassbandPilotTrackDump {
         pilot_phase_rad,
         pilot_evm,
+        hest_mag_mean,
+        hest_mag_max,
     })
 }
 

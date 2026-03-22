@@ -118,7 +118,7 @@ impl Default for OfdmConfig {
             pilot_bins: vec![2, 4],
             num_pilots: None,
             use_pilots: None,
-            retrain_interval_data_symbols: Some(2),
+            retrain_interval_data_symbols: Some(1),
             terminal_training_symbol: true,
             modulation: Modulation::Bpsk,
             wake_ms: 100.0,

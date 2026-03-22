@@ -12,6 +12,7 @@ mod logging;
 use acoustic_ofdm::{
     diagnose_passband_window,
     dump_passband_constellation,
+    dump_passband_pilot_tracking,
     dump_passband_sync_metric,
     decode_single_packet_passband,
     encode_single_packet_passband,
@@ -1309,7 +1310,14 @@ fn estimated_packet_len_samples(cfg: &OfdmConfig) -> usize {
     let max_bits = max_payload_bytes * 8;
     let bits_per_ofdm = n_data_carriers * bps;
     let n_data_ofdm = max_bits.div_ceil(bits_per_ofdm) + 2;
-    let baseband_len = 2 * cfg.sync_half_len + (1 + n_data_ofdm) * (cfg.nfft + cfg.ncp);
+    let retrain_count = cfg
+        .retrain_interval_data_symbols
+        .filter(|&interval| interval > 0)
+        .map(|interval| n_data_ofdm / interval)
+        .unwrap_or(0);
+    let terminal_training = usize::from(cfg.terminal_training_symbol);
+    let n_training_symbols = 1 + retrain_count + terminal_training;
+    let baseband_len = 2 * cfg.sync_half_len + (n_training_symbols + n_data_ofdm) * (cfg.nfft + cfg.ncp);
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     wake_len + guard_len + baseband_len
@@ -1583,8 +1591,15 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     }
     drop(in_stream);
 
+    let target_samples = (opts.duration_sec * cfg_rt.fs).round().max(0.0) as usize;
     while let Some(s) = in_cons.try_pop() {
+        if rx.len() >= target_samples {
+            break;
+        }
         rx.push(s);
+    }
+    if rx.len() > target_samples {
+        rx.truncate(target_samples);
     }
     let captured_samples = rx.len();
     info_line!("Captured samples: {captured_samples}");
@@ -1768,6 +1783,21 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                         let post_csv = post_path.display();
                         debug_line!("Saved constellation CSV: {pre_csv}");
                         debug_line!("Saved constellation CSV: {post_csv}");
+                    }
+                    if let Some(track) = dump_passband_pilot_tracking(&rx[off..end], &cfg_rt) {
+                        for (i, (phase_rad, pilot_evm)) in track
+                            .pilot_phase_rad
+                            .iter()
+                            .zip(track.pilot_evm.iter())
+                            .take(8)
+                            .enumerate()
+                        {
+                            let sym = i + 1;
+                            let phase_deg = phase_rad.to_degrees();
+                            debug_line!(
+                                "Pilot track sym={sym:2}: phase={phase_rad:.3}rad ({phase_deg:.1}deg) pilot_evm={pilot_evm:.3}"
+                            );
+                        }
                     }
                     if let Some(sync_dump) = dump_passband_sync_metric(&rx[off..end], &cfg_rt) {
                         let sync_path = Path::new("/tmp/ofdm_sync_metric.csv");

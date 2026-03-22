@@ -11,6 +11,7 @@ pub use config::{Modulation, OfdmConfig, WakePreamble};
 pub use modem::{
     diagnose_passband_window,
     dump_passband_constellation,
+    dump_passband_pilot_tracking,
     dump_passband_sync_metric,
     decode_encoded_burst_oracle,
     decode_packet_baseband,
@@ -20,6 +21,7 @@ pub use modem::{
     EncodedBurst,
     PassbandConstellationDump,
     PassbandDiagnostics,
+    PassbandPilotTrackDump,
     PassbandSyncDump,
 };
 pub use spectrogram::save_spectrogram_png;

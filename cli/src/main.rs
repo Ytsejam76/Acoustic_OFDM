@@ -17,6 +17,7 @@ use acoustic_ofdm::{
     decode_single_packet_passband,
     encode_single_packet_passband,
     load_wav_mono_f32,
+    save_constellation_comparison_png,
     save_spectrogram_png,
     save_wav_mono_i16,
     OfdmConfig,
@@ -1763,6 +1764,7 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     if let Some(dump) = dump_passband_constellation(&rx[off..end], &cfg_rt) {
                         let pre_path = Path::new("/tmp/ofdm_constellation_pre_eq.csv");
                         let post_path = Path::new("/tmp/ofdm_constellation_post_eq.csv");
+                        let plot_png_path = Path::new("/tmp/ofdm_constellation.png");
                         {
                             let mut out = std::io::BufWriter::new(std::fs::File::create(pre_path)?);
                             writeln!(out, "re,im")?;
@@ -1779,10 +1781,13 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                             }
                             out.flush()?;
                         }
+                        save_constellation_comparison_png(plot_png_path, &dump.pre_eq, &dump.post_eq)?;
                         let pre_csv = pre_path.display();
                         let post_csv = post_path.display();
+                        let plot_png = plot_png_path.display();
                         debug_line!("Saved constellation CSV: {pre_csv}");
                         debug_line!("Saved constellation CSV: {post_csv}");
+                        debug_line!("Saved constellation PNG: {plot_png}");
                     }
                     if let Some(track) = dump_passband_pilot_tracking(&rx[off..end], &cfg_rt) {
                         for (i, (phase_rad, pilot_evm)) in track

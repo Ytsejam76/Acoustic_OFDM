@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
 pub mod config;
+pub mod constellation;
 pub mod crc;
 pub mod packet;
 pub mod modem;
@@ -24,6 +25,7 @@ pub use modem::{
     PassbandPilotTrackDump,
     PassbandSyncDump,
 };
+pub use constellation::save_constellation_comparison_png;
 pub use spectrogram::save_spectrogram_png;
 pub use wav_io::{load_wav_mono_f32, save_wav_mono_i16};
 

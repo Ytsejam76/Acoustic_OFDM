@@ -162,7 +162,7 @@ pub fn save_spectrogram_png(path: &Path, x: &[f32], fs: f32) -> Result<(), Box<d
     }
     legend_area.draw(&Text::new(
         "Power [dB]",
-        (lw - 10, lh / 2),
+        (lw - 26, lh / 2),
         ("sans-serif", 18)
             .into_font()
             .transform(FontTransform::Rotate90),

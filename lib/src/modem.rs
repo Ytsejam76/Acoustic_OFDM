@@ -83,6 +83,31 @@ fn apply_pilot_phase_correction(
     }
 }
 
+fn sample_complex_linear(x: &[Complex32], pos: f32) -> Complex32 {
+    if x.is_empty() || pos < 0.0 {
+        return Complex32::new(0.0, 0.0);
+    }
+    let i0 = pos.floor() as usize;
+    if i0 >= x.len() {
+        return Complex32::new(0.0, 0.0);
+    }
+    let i1 = (i0 + 1).min(x.len() - 1);
+    let a = pos - (i0 as f32);
+    x[i0] * (1.0 - a) + x[i1] * a
+}
+
+fn resample_from_offset(x: &[Complex32], start: f32) -> Vec<Complex32> {
+    if x.is_empty() {
+        return Vec::new();
+    }
+    let n = x.len().saturating_sub(start.floor().max(0.0) as usize);
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        out.push(sample_complex_linear(x, start + (k as f32)));
+    }
+    out
+}
+
 /// Computes RMS EVM between equalized symbols and a known reference.
 ///
 /// Parameters:
@@ -244,9 +269,9 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
-    let rbb_sync = &rbb[sync_off..];
-    let cfo_hz = estimate_coarse_cfo_hz(rbb_sync, cfg);
-    let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+    let rbb_sync = resample_from_offset(rbb, sync_off);
+    let cfo_hz = estimate_coarse_cfo_hz(&rbb_sync, cfg);
+    let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
 
     let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
     let xsync_len = 2 * cfg.sync_half_len;
@@ -254,7 +279,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     if rbb_cfo.len() < xsync_len + train_len || used_bins.is_empty() {
         return PassbandDiagnostics {
             enough_samples: false,
-            sync_off,
+            sync_off: sync_off.round() as usize,
             cfo_hz,
             train_rms: 0.0,
             hest_mag_min: 0.0,
@@ -327,7 +352,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
 
     PassbandDiagnostics {
         enough_samples: true,
-        sync_off,
+        sync_off: sync_off.round() as usize,
         cfo_hz,
         train_rms,
         hest_mag_min,
@@ -366,8 +391,8 @@ pub fn dump_passband_constellation(
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
-    let rbb_sync = &rbb[sync_off..];
-    let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+    let rbb_sync = resample_from_offset(rbb, sync_off);
+    let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
 
     let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
     if used_bins.is_empty() || data_bins.is_empty() {
@@ -442,7 +467,11 @@ pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<
     let metrics = repeated_half_sync_metrics(rbb, cfg);
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let refined_sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
-    Some(PassbandSyncDump { coarse_sync_off, refined_sync_off, metrics })
+    Some(PassbandSyncDump {
+        coarse_sync_off,
+        refined_sync_off: refined_sync_off.round() as usize,
+        metrics,
+    })
 }
 
 /// Encodes one packet into passband samples (wake + guard + OFDM body).
@@ -615,9 +644,9 @@ fn decode_packet_from_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Pa
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
-    for off in [sync_off, coarse_sync_off] {
-        let rbb_sync = &rbb[off..];
-        let rbb_cfo = coarse_cfo_correct(rbb_sync, cfg);
+    for off in [sync_off, coarse_sync_off as f32] {
+        let rbb_sync = resample_from_offset(rbb, off);
+        let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
         if let Some(pkt) = decode_packet_info_baseband(&rbb_cfo, cfg) {
             return Some(pkt);
         }
@@ -682,47 +711,99 @@ fn repeated_half_sync_metrics(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<f32> {
 /// - `coarse_off`: coarse sync offset.
 /// Returns:
 /// - `usize`: refined sync offset.
-fn refine_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig, coarse_off: usize) -> usize {
-    let search = (cfg.ncp / 8).clamp(2, 8);
-    let start = coarse_off.saturating_sub(search);
-    let stop = coarse_off.saturating_add(search).min(rbb.len().saturating_sub(1));
-    let mut best_off = coarse_off;
-    let mut best_score = training_cp_score(&rbb[coarse_off..], cfg);
-    for off in start..=stop {
-        let score = training_cp_score(&rbb[off..], cfg);
-        if score > best_score + 1e-4 {
-            best_score = score;
-            best_off = off;
+fn refine_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig, coarse_off: usize) -> f32 {
+    let search = (cfg.ncp / 8).clamp(2, 8) as i32;
+    let mut best_off = coarse_off as f32;
+    let mut best_score = sync_quality_score_fractional(rbb, cfg, best_off);
+    for di in -search..=search {
+        let base = (coarse_off as i32 + di).max(0) as f32;
+        for q in 0..4 {
+            let off = base + 0.25 * (q as f32);
+            let score = sync_quality_score_fractional(rbb, cfg, off);
+            if score > best_score + 1e-4 {
+                best_score = score;
+                best_off = off;
+            }
         }
     }
     best_off
 }
 
-/// Scores one timing hypothesis using the training-symbol CP match.
-///
-/// Parameters:
-/// - `rbb`: baseband samples starting at a sync hypothesis.
-/// - `cfg`: modem configuration.
-/// Returns:
-/// - `f32`: normalized CP correlation score.
-fn training_cp_score(rbb: &[Complex32], cfg: &OfdmConfig) -> f32 {
+fn training_cp_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig, off: f32) -> f32 {
     let xsync_len = 2 * cfg.sync_half_len;
     let train_end = xsync_len + cfg.ncp + cfg.nfft;
-    if rbb.len() < train_end || cfg.ncp == 0 || cfg.nfft == 0 {
+    let need = off.ceil().max(0.0) as usize + train_end;
+    if rbb.len() < need || cfg.ncp == 0 || cfg.nfft == 0 {
         return -1.0;
     }
-    let cp = &rbb[xsync_len..xsync_len + cfg.ncp];
-    let tail = &rbb[xsync_len + cfg.nfft..xsync_len + cfg.nfft + cfg.ncp];
     let mut num = Complex32::new(0.0, 0.0);
     let mut e1 = 0.0f32;
     let mut e2 = 0.0f32;
     for k in 0..cfg.ncp {
-        num += cp[k].conj() * tail[k];
-        e1 += cp[k].norm_sqr();
-        e2 += tail[k].norm_sqr();
+        let cp = sample_complex_linear(rbb, off + xsync_len as f32 + k as f32);
+        let tail = sample_complex_linear(rbb, off + xsync_len as f32 + cfg.nfft as f32 + k as f32);
+        num += cp.conj() * tail;
+        e1 += cp.norm_sqr();
+        e2 += tail.norm_sqr();
     }
     let den = (e1 * e2).sqrt().max(1e-9);
     num.norm() / den
+}
+
+fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig, off: f32) -> f32 {
+    let rbb_sync = resample_from_offset(rbb, off);
+    let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
+    let (used_bins, pilot_bins, _data_bins) = ofdm_bin_plan(cfg);
+    let xsync_len = 2 * cfg.sync_half_len;
+    let train_len = cfg.nfft + cfg.ncp;
+    let need = xsync_len + train_len;
+    if rbb_cfo.len() < need || used_bins.is_empty() {
+        return -1.0;
+    }
+
+    let cp_score = training_cp_score_fractional(rbb, cfg, off);
+    let train_start = xsync_len;
+    let train_no_cp = &rbb_cfo[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
+    let ytrain = fft(train_no_cp);
+    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
+    let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
+    let mut ytrain_eq = Vec::with_capacity(used_bins.len());
+    let mut hmag_sum = 0.0f32;
+    for (k, &bin) in used_bins.iter().enumerate() {
+        let h = ytrain[bin] / train_known[k];
+        hest[k] = h;
+        hmag_sum += h.norm();
+        ytrain_eq.push(regularized_equalize(ytrain[bin], h));
+    }
+    let train_evm = rms_evm(&ytrain_eq, &train_known);
+    let hmag_mean = hmag_sum / (used_bins.len() as f32);
+
+    let mut pilot_evm = 0.0f32;
+    if !pilot_bins.is_empty() {
+        let sym_len = cfg.nfft + cfg.ncp;
+        let s0 = xsync_len + train_len;
+        let s1 = s0 + sym_len;
+        if s1 <= rbb_cfo.len() {
+            let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
+            let mut xeq_used = Vec::with_capacity(used_bins.len());
+            for (k, &bin) in used_bins.iter().enumerate() {
+                xeq_used.push(regularized_equalize(y[bin], hest[k]));
+            }
+            let pref = known_pilot_symbols(pilot_bins.len(), 1);
+            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
+            let mut pilot_eq = Vec::new();
+            let mut pilot_ref = Vec::new();
+            for (k, pbin) in pilot_bins.iter().enumerate() {
+                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                    pilot_eq.push(xeq_used[pos]);
+                    pilot_ref.push(pref[k]);
+                }
+            }
+            pilot_evm = rms_evm(&pilot_eq, &pilot_ref);
+        }
+    }
+
+    2.0 * cp_score + 0.3 * hmag_mean - 2.0 * train_evm - 1.5 * pilot_evm
 }
 
 /// Applies coarse CFO correction from the repeated-half sync preamble.

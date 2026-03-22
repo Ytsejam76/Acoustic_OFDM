@@ -1531,10 +1531,14 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     in_stream.play()?;
     let mut rx = Vec::<f32>::new();
     let t0 = Instant::now();
+    let deadline = t0 + Duration::from_secs_f32(opts.duration_sec);
     let mut last_rt_try = Instant::now();
-    while t0.elapsed() < Duration::from_secs_f32(opts.duration_sec) {
+    while Instant::now() < deadline {
         while let Some(s) = in_cons.try_pop() {
             rx.push(s);
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         if last_rt_try.elapsed() >= Duration::from_millis(300) {
             let tail_span = ((cfg_rt.fs * 3.0).round() as usize).max(1);
@@ -1565,13 +1569,17 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 return Ok(());
             }
             if opts.verbose {
-                let rt = t0.elapsed().as_secs_f32();
+                let rt = t0.elapsed().as_secs_f32().min(opts.duration_sec);
                 let captured = rx.len();
                 debug_line!("Realtime: checked t={rt:.3}s captured={captured}");
             }
             last_rt_try = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(10));
+        if let Some(rem) = deadline.checked_duration_since(Instant::now()) {
+            std::thread::sleep(rem.min(Duration::from_millis(10)));
+        } else {
+            break;
+        }
     }
     drop(in_stream);
 
@@ -1664,6 +1672,16 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 .then_with(|| b.1.total_cmp(&a.1))
                 .then_with(|| a.0.cmp(&b.0))
         });
+        let ranked_cands_simple: Vec<(usize, f32, f32, bool)> = ranked_cands
+            .iter()
+            .map(|(idx, wake_score, diag_score, plausible, _)| (*idx, *wake_score, *diag_score, *plausible))
+            .collect();
+        let refined = ranked_offset_hypotheses(&rx, &ranked_cands_simple, est_pkt, pad, &cfg_rt);
+        let primary_off = refined
+            .first()
+            .map(|(off, _)| *off)
+            .or_else(|| ranked_cands.first().map(|(idx, _, _, _, _)| *idx));
+
         if opts.verbose {
             let ncands = cands.len();
             let nregions = active_regions.len();
@@ -1706,8 +1724,9 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     print_passband_diagnostics(&format!("  cand {:2} diag", i + 1), &rx[off..end], &cfg_rt);
                 }
             }
-            if let Some((idx, _, _, _, _)) = ranked_cands.first() {
-                let off = *idx;
+            if let Some(off) = primary_off {
+                let off_sec = (off as f32) / cfg_rt.fs;
+                debug_line!("Primary hypothesis: off={off} t={off_sec:.3}s");
                 let end = off.saturating_add(est_pkt + pad).min(rx.len());
                 if end > off + cfg_rt.nfft + cfg_rt.ncp {
                     let (local_clipped, local_clipped_frac) = clipping_diag(&rx[off..end]);
@@ -1767,13 +1786,6 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                     }
                 }
             }
-        }
-        let ranked_cands_simple: Vec<(usize, f32, f32, bool)> = ranked_cands
-            .iter()
-            .map(|(idx, wake_score, diag_score, plausible, _)| (*idx, *wake_score, *diag_score, *plausible))
-            .collect();
-        let refined = ranked_offset_hypotheses(&rx, &ranked_cands_simple, est_pkt, pad, &cfg_rt);
-        if opts.verbose {
             let nrefined = refined.len();
             let nseeds = ranked_cands_simple.len().min(3);
             debug_line!("Metric refinement: {nrefined} shortlisted offsets from top {nseeds} seeds");

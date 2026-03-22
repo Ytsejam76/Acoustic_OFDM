@@ -88,7 +88,7 @@ pub fn save_spectrogram_png(path: &Path, x: &[f32], fs: f32) -> Result<(), Box<d
 
     let root = BitMapBackend::new(path, (1280, 720)).into_drawing_area();
     root.fill(&RGBColor(245, 245, 240))?;
-    let (main_area, legend_area) = root.split_horizontally(1180);
+    let (main_area, legend_area) = root.split_horizontally(1120);
 
     let mut chart = ChartBuilder::on(&main_area)
         .caption("RX Spectrogram", ("sans-serif", 28).into_font())
@@ -125,24 +125,48 @@ pub fn save_spectrogram_png(path: &Path, x: &[f32], fs: f32) -> Result<(), Box<d
     chart.draw_series(cells)?;
 
     legend_area.fill(&RGBColor(245, 245, 240))?;
-    let mut legend = ChartBuilder::on(&legend_area)
-        .margin(30)
-        .y_label_area_size(50)
-        .build_cartesian_2d(0f32..1f32, floor_db..max_db)?;
-    legend
-        .configure_mesh()
-        .disable_x_mesh()
-        .disable_x_axis()
-        .y_desc("Power [dB]")
-        .axis_desc_style(("sans-serif", 18))
-        .label_style(("sans-serif", 14))
-        .draw()?;
+    let (lw, lh) = legend_area.dim_in_pixel();
+    let lw = lw as i32;
+    let lh = lh as i32;
+    let bar_left = 28i32;
+    let bar_right = 52i32;
+    let bar_top = 36i32;
+    let bar_bottom = (lh - 42).max(bar_top + 1);
     let n_steps = 256usize;
-    legend.draw_series((0..n_steps).map(|i| {
-        let y0 = floor_db + (i as f32) * (max_db - floor_db) / (n_steps as f32);
-        let y1 = floor_db + ((i + 1) as f32) * (max_db - floor_db) / (n_steps as f32);
-        Rectangle::new([(0.0, y0), (1.0, y1)], viridis_like((i as f32) / ((n_steps - 1) as f32)).filled())
-    }))?;
+    for i in 0..n_steps {
+        let y0 = bar_bottom - ((i as i32) * (bar_bottom - bar_top) / (n_steps as i32));
+        let y1 = bar_bottom - (((i + 1) as i32) * (bar_bottom - bar_top) / (n_steps as i32));
+        legend_area.draw(&Rectangle::new(
+            [(bar_left, y1), (bar_right, y0.max(y1 + 1))],
+            viridis_like((i as f32) / ((n_steps - 1) as f32)).filled(),
+        ))?;
+    }
+    legend_area.draw(&Rectangle::new(
+        [(bar_left, bar_top), (bar_right, bar_bottom)],
+        ShapeStyle::from(&BLACK).stroke_width(1),
+    ))?;
+
+    let tick_vals = [max_db, max_db - 20.0, max_db - 40.0, max_db - 60.0, floor_db];
+    for &db in &tick_vals {
+        let a = ((db - floor_db) / (max_db - floor_db).max(1e-6)).clamp(0.0, 1.0);
+        let y = bar_bottom - ((a * ((bar_bottom - bar_top) as f32)).round() as i32);
+        legend_area.draw(&PathElement::new(
+            vec![(bar_right + 2, y), (bar_right + 10, y)],
+            BLACK,
+        ))?;
+        legend_area.draw(&Text::new(
+            format!("{db:.0}"),
+            (bar_right + 14, y + 5),
+            ("sans-serif", 15).into_font(),
+        ))?;
+    }
+    legend_area.draw(&Text::new(
+        "Power [dB]",
+        (lw - 10, lh / 2),
+        ("sans-serif", 18)
+            .into_font()
+            .transform(FontTransform::Rotate90),
+    ))?;
 
     root.present()?;
     Ok(())

@@ -55,6 +55,34 @@ fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
     y * h.conj() / (h_pow + eps)
 }
 
+fn apply_pilot_phase_correction(
+    xeq_used: &mut [Complex32],
+    used_bins: &[usize],
+    pilot_bins: &[usize],
+    pref: &[Complex32],
+) {
+    if pilot_bins.is_empty() || pref.is_empty() {
+        return;
+    }
+
+    let mut acc = Complex32::new(0.0, 0.0);
+    for (k, pbin) in pilot_bins.iter().enumerate() {
+        if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+            acc += xeq_used[pos] * pref[k].conj();
+        }
+    }
+
+    if acc.norm() <= 1.0e-9 {
+        return;
+    }
+
+    let phase = acc.arg();
+    let rot = Complex32::from_polar(1.0, -phase);
+    for v in xeq_used {
+        *v *= rot;
+    }
+}
+
 /// Computes RMS EVM between equalized symbols and a known reference.
 ///
 /// Parameters:
@@ -279,22 +307,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
         }
         if !pilot_bins.is_empty() {
             let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
-            let mut num = Complex32::new(0.0, 0.0);
-            let mut den = 0.0f32;
-            for (k, pbin) in pilot_bins.iter().enumerate() {
-                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-                    num += xeq_used[pos] * pref[k].conj();
-                    den += pref[k].norm_sqr();
-                }
-            }
-            if den > 0.0 {
-                let g = num / den;
-                if g.norm() > 1e-9 {
-                    for v in &mut xeq_used {
-                        *v /= g;
-                    }
-                }
-            }
+            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
             for (k, pbin) in pilot_bins.iter().enumerate() {
                 if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
                     pilot_eq.push(xeq_used[pos]);
@@ -394,22 +407,7 @@ pub fn dump_passband_constellation(
         }
         if !pilot_bins.is_empty() {
             let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
-            let mut num = Complex32::new(0.0, 0.0);
-            let mut den = 0.0f32;
-            for (k, pbin) in pilot_bins.iter().enumerate() {
-                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-                    num += xeq_used[pos] * pref[k].conj();
-                    den += pref[k].norm_sqr();
-                }
-            }
-            if den > 0.0 {
-                let g = num / den;
-                if g.norm() > 1e-9 {
-                    for v in &mut xeq_used {
-                        *v /= g;
-                    }
-                }
-            }
+            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
         }
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
@@ -577,22 +575,7 @@ fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Pa
         }
         if !pilot_bins.is_empty() {
             let pref = known_pilot_symbols(pilot_bins.len(), i + 1);
-            let mut num = Complex32::new(0.0, 0.0);
-            let mut den = 0.0f32;
-            for (k, pbin) in pilot_bins.iter().enumerate() {
-                if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-                    num += xeq_used[pos] * pref[k].conj();
-                    den += pref[k].norm_sqr();
-                }
-            }
-            if den > 0.0 {
-                let g = num / den;
-                if g.norm() > 1e-9 {
-                    for v in &mut xeq_used {
-                        *v /= g;
-                    }
-                }
-            }
+            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
         }
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {

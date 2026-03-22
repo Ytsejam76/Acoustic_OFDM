@@ -1270,6 +1270,13 @@ fn filter_candidates_by_regions(cands: &[(usize, f32)], regions: &[ActiveRegion]
         .tap_mut(|v| v.sort_by(|a, b| b.1.total_cmp(&a.1)))
 }
 
+fn candidate_region_index(idx: usize, regions: &[ActiveRegion], keep_regions: usize) -> Option<usize> {
+    regions
+        .iter()
+        .take(keep_regions)
+        .position(|r| idx >= r.start && idx < r.end)
+}
+
 trait TapMut: Sized {
     fn tap_mut<F: FnOnce(&mut Self)>(mut self, f: F) -> Self {
         f(&mut self);
@@ -1387,16 +1394,41 @@ fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> O
             }
         }
     }
-    let ranked_cands: Vec<(usize, f32, f32, bool)> = cands
-        .iter()
-        .take(3)
-        .filter_map(|(idx, wake_score)| {
-            let end = idx.saturating_add(est_pkt + pad).min(rx_raw.len());
-            (end > *idx + cfg.nfft + cfg.ncp).then(|| {
-                let diag = diagnose_passband_window(&rx_raw[*idx..end], cfg);
-                (*idx, *wake_score, diagnostic_candidate_score(&diag), plausible_candidate(&diag))
-            })
-        })
+    let keep_regions = regions.len().min(3);
+    let mut region_best: Vec<(usize, f32, f32, bool, usize)> = Vec::new();
+    for (idx, wake_score) in cands.iter().take(8) {
+        let Some(region_idx) = candidate_region_index(*idx, &regions, keep_regions) else {
+            continue;
+        };
+        let end = idx.saturating_add(est_pkt + pad).min(rx_raw.len());
+        if end <= *idx + cfg.nfft + cfg.ncp {
+            continue;
+        }
+        let diag = diagnose_passband_window(&rx_raw[*idx..end], cfg);
+        let cand = (*idx, *wake_score, diagnostic_candidate_score(&diag), plausible_candidate(&diag));
+        match region_best.iter_mut().find(|(_, _, _, _, ridx)| *ridx == region_idx) {
+            Some(best) => {
+                if cand.3.cmp(&best.3)
+                    .then_with(|| cand.2.total_cmp(&best.2))
+                    .then_with(|| cand.1.total_cmp(&best.1))
+                    .then_with(|| best.0.cmp(&cand.0))
+                    .is_gt()
+                {
+                    *best = (cand.0, cand.1, cand.2, cand.3, region_idx);
+                }
+            }
+            None => region_best.push((cand.0, cand.1, cand.2, cand.3, region_idx)),
+        }
+    }
+    region_best.sort_by(|a, b| {
+        b.3.cmp(&a.3)
+            .then_with(|| b.2.total_cmp(&a.2))
+            .then_with(|| b.1.total_cmp(&a.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let ranked_cands: Vec<(usize, f32, f32, bool)> = region_best
+        .into_iter()
+        .map(|(idx, wake_score, diag_score, plausible, _)| (idx, wake_score, diag_score, plausible))
         .collect();
     for (off, _) in ranked_offset_hypotheses(rx_raw, &ranked_cands, est_pkt, pad, cfg) {
         let end = off.saturating_add(est_pkt + pad).min(rx_raw.len());
@@ -1551,12 +1583,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
     if let Some(path) = &opts.dump_wav {
         save_wav_mono_i16(Path::new(path), &rx, cfg_rt.fs.round() as u32)?;
         info_line!("Saved RX capture: {path}");
-        if opts.spectrogram {
-            let spec_path = Path::new(&opts.spectrogram_path);
-            save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
-            let spectrogram_path = spec_path.display();
-            info_line!("Saved spectrogram PNG: {spectrogram_path}");
-        }
+    }
+    if opts.spectrogram {
+        let spec_path = Path::new(&opts.spectrogram_path);
+        save_spectrogram_png(spec_path, &rx, cfg_rt.fs)?;
+        let spectrogram_path = spec_path.display();
+        info_line!("Saved spectrogram PNG: {spectrogram_path}");
     }
     let rx_sync = filter_for_sync_detection(
         &rx,
@@ -1576,11 +1608,6 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
         debug_line!("RX clipping: {clipped} samples ({clipped_pct:.2}%) at |x| >= 0.995");
         if peak < 0.01 {
             warn_line!("RX warning: very low capture level; increase speaker volume or mic gain.");
-        }
-        if clipped_frac >= 0.001 {
-            warn_line!("RX warning: capture is clipping; reduce speaker volume, mic gain, or disable AGC.");
-        } else if clipped_frac >= 0.0001 {
-            warn_line!("RX warning: capture is close to clipping.");
         }
     }
 
@@ -1603,8 +1630,12 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
             &active_regions,
         );
         let cands = refine_wake_candidates_fractional(&rx_sync, &wake, &cands0);
-        let mut ranked_cands: Vec<(usize, f32, f32, bool)> = Vec::new();
+        let keep_regions = active_regions.len().min(3);
+        let mut ranked_cands: Vec<(usize, f32, f32, bool, usize)> = Vec::new();
         for (idx, wake_score) in cands.iter().copied().take(8) {
+            let Some(region_idx) = candidate_region_index(idx, &active_regions, keep_regions) else {
+                continue;
+            };
             let end = idx.saturating_add(est_pkt + pad).min(rx.len());
             if end <= idx + cfg_rt.nfft + cfg_rt.ncp {
                 continue;
@@ -1612,7 +1643,20 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
             let diag = diagnose_passband_window(&rx[idx..end], &cfg_rt);
             let diag_score = diagnostic_candidate_score(&diag);
             let plausible = plausible_candidate(&diag);
-            ranked_cands.push((idx, wake_score, diag_score, plausible));
+            let cand = (idx, wake_score, diag_score, plausible, region_idx);
+            match ranked_cands.iter_mut().find(|(_, _, _, _, ridx)| *ridx == region_idx) {
+                Some(best) => {
+                    if cand.3.cmp(&best.3)
+                        .then_with(|| cand.2.total_cmp(&best.2))
+                        .then_with(|| cand.1.total_cmp(&best.1))
+                        .then_with(|| best.0.cmp(&cand.0))
+                        .is_gt()
+                    {
+                        *best = cand;
+                    }
+                }
+                None => ranked_cands.push(cand),
+            }
         }
         ranked_cands.sort_by(|a, b| {
             b.3.cmp(&a.3)
@@ -1643,28 +1687,45 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 let score = *sc;
                 debug_line!("  cand {cand:2}: idx={idx_val} t={time_sec:.3}s score={score:.4}");
             }
-            for (i, (idx, wake_score, diag_score, plausible)) in ranked_cands.iter().take(3).enumerate() {
+            for (i, (idx, wake_score, diag_score, plausible, region_idx)) in ranked_cands.iter().take(3).enumerate() {
                 let rank = i + 1;
                 let idx_val = *idx;
                 let time_sec = (idx_val as f32) / cfg_rt.fs;
                 let wake_score = *wake_score;
                 let diag_score = *diag_score;
                 let plausible = *plausible;
+                let region = region_idx + 1;
                 debug_line!(
-                    "  rank {rank:2}: idx={idx_val} t={time_sec:.3}s wake_score={wake_score:.4} diag_score={diag_score:.4} plausible={plausible}"
+                    "  rank {rank:2}: idx={idx_val} t={time_sec:.3}s region={region} wake_score={wake_score:.4} diag_score={diag_score:.4} plausible={plausible}"
                 );
             }
-            for (i, (idx, _, _, _)) in ranked_cands.iter().take(3).enumerate() {
+            for (i, (idx, _, _, _, _)) in ranked_cands.iter().take(3).enumerate() {
                 let off = *idx;
                 let end = off.saturating_add(est_pkt + pad).min(rx.len());
                 if end > off + cfg_rt.nfft + cfg_rt.ncp {
                     print_passband_diagnostics(&format!("  cand {:2} diag", i + 1), &rx[off..end], &cfg_rt);
                 }
             }
-            if let Some((idx, _, _, _)) = ranked_cands.first() {
+            if let Some((idx, _, _, _, _)) = ranked_cands.first() {
                 let off = *idx;
                 let end = off.saturating_add(est_pkt + pad).min(rx.len());
                 if end > off + cfg_rt.nfft + cfg_rt.ncp {
+                    let (local_clipped, local_clipped_frac) = clipping_diag(&rx[off..end]);
+                    let local_clipped_pct = 100.0 * local_clipped_frac;
+                    debug_line!(
+                        "Top-window clipping: {local_clipped} samples ({local_clipped_pct:.2}%) at |x| >= 0.995"
+                    );
+                    if local_clipped_frac >= 0.001 {
+                        warn_line!(
+                            "RX warning: selected packet window is clipping; reduce speaker volume, mic gain, or disable AGC."
+                        );
+                    } else if local_clipped_frac >= 0.0001 {
+                        warn_line!("RX warning: selected packet window is close to clipping.");
+                    } else if clipped_frac >= 0.001 {
+                        debug_line!(
+                            "Global clipping exists outside the selected packet window; gain reduction may not be necessary for this decode."
+                        );
+                    }
                     if let Some(dump) = dump_passband_constellation(&rx[off..end], &cfg_rt) {
                         let pre_path = Path::new("/tmp/ofdm_constellation_pre_eq.csv");
                         let post_path = Path::new("/tmp/ofdm_constellation_post_eq.csv");
@@ -1707,10 +1768,14 @@ fn cmd_rx(cfg: &OfdmConfig, opts: &AudioOpts, stdout_raw: bool) -> Result<(), Bo
                 }
             }
         }
-        let refined = ranked_offset_hypotheses(&rx, &ranked_cands, est_pkt, pad, &cfg_rt);
+        let ranked_cands_simple: Vec<(usize, f32, f32, bool)> = ranked_cands
+            .iter()
+            .map(|(idx, wake_score, diag_score, plausible, _)| (*idx, *wake_score, *diag_score, *plausible))
+            .collect();
+        let refined = ranked_offset_hypotheses(&rx, &ranked_cands_simple, est_pkt, pad, &cfg_rt);
         if opts.verbose {
             let nrefined = refined.len();
-            let nseeds = ranked_cands.len().min(3);
+            let nseeds = ranked_cands_simple.len().min(3);
             debug_line!("Metric refinement: {nrefined} shortlisted offsets from top {nseeds} seeds");
             for (i, (off, diag)) in refined.iter().take(6).enumerate() {
                 let refine = i + 1;

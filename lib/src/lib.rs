@@ -12,6 +12,7 @@ pub use config::{Modulation, OfdmConfig, WakePreamble};
 pub use modem::{
     diagnose_passband_window,
     dump_passband_constellation,
+    dump_passband_bins,
     dump_passband_pilot_tracking,
     dump_passband_sync_metric,
     decode_encoded_burst_oracle,
@@ -21,6 +22,8 @@ pub use modem::{
     encode_single_packet_passband,
     EncodedBurst,
     PassbandConstellationDump,
+    PassbandBinDump,
+    PassbandBinDumpRow,
     PassbandDiagnostics,
     PassbandPilotTrackDump,
     PassbandSyncDump,

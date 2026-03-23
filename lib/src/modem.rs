@@ -31,6 +31,7 @@ pub struct PassbandDiagnostics {
     pub hest_mag_max: f32,
     pub train_recon_evm: f32,
     pub pilot_residual_evm: f32,
+    pub pilot_post_evm: f32,
     pub post_eq_evm: f32,
     pub decoded: bool,
     pub decoded_payload_len: Option<usize>,
@@ -45,9 +46,25 @@ pub struct PassbandConstellationDump {
 #[derive(Clone, Debug)]
 pub struct PassbandPilotTrackDump {
     pub pilot_phase_rad: Vec<f32>,
-    pub pilot_evm: Vec<f32>,
+    pub pilot_evm_pre: Vec<f32>,
+    pub pilot_evm_post: Vec<f32>,
     pub hest_mag_mean: Vec<f32>,
     pub hest_mag_max: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PassbandBinDumpRow {
+    pub data_symbol_idx: usize,
+    pub used_bin: usize,
+    pub role: &'static str,
+    pub pre_eq: Complex32,
+    pub post_eq: Complex32,
+    pub reference: Option<Complex32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PassbandBinDump {
+    pub rows: Vec<PassbandBinDumpRow>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,32 +80,72 @@ fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
     y * h.conj() / (h_pow + eps)
 }
 
-fn apply_pilot_phase_correction(
-    xeq_used: &mut [Complex32],
+fn interpolate_complex_by_bins(points: &[(f32, Complex32)], used_bins: &[usize]) -> Vec<Complex32> {
+    if used_bins.is_empty() {
+        return Vec::new();
+    }
+    if points.is_empty() {
+        return vec![Complex32::new(1.0, 0.0); used_bins.len()];
+    }
+    if points.len() == 1 {
+        return vec![points[0].1; used_bins.len()];
+    }
+
+    let mut corr = Vec::with_capacity(used_bins.len());
+    for &ubin in used_bins {
+        let x = ubin as f32;
+        let val = if x <= points[0].0 {
+            points[0].1
+        } else if x >= points[points.len() - 1].0 {
+            points[points.len() - 1].1
+        } else {
+            let mut interp = points[0].1;
+            for w in points.windows(2) {
+                let (x0, c0) = w[0];
+                let (x1, c1) = w[1];
+                if x >= x0 && x <= x1 {
+                    let a = ((x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+                    interp = c0 * (1.0 - a) + c1 * a;
+                    break;
+                }
+            }
+            interp
+        };
+        corr.push(val);
+    }
+    corr
+}
+
+fn update_channel_from_pilots(
+    y: &[Complex32],
     used_bins: &[usize],
     pilot_bins: &[usize],
     pref: &[Complex32],
-) {
-    if pilot_bins.is_empty() || pref.is_empty() {
-        return;
+    hest: &[Complex32],
+) -> Vec<Complex32> {
+    if used_bins.is_empty() || hest.len() != used_bins.len() || pilot_bins.is_empty() || pref.is_empty() {
+        return hest.to_vec();
     }
 
-    let mut acc = Complex32::new(0.0, 0.0);
+    let mut h_points = Vec::new();
     for (k, pbin) in pilot_bins.iter().enumerate() {
-        if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-            acc += xeq_used[pos] * pref[k].conj();
-        }
+        let Some(_pos) = used_bins.iter().position(|b| b == pbin) else {
+            continue;
+        };
+        let h_obs = y[*pbin] / pref[k];
+        h_points.push((*pbin as f32, h_obs));
     }
 
-    if acc.norm() <= 1.0e-9 {
-        return;
+    if h_points.is_empty() {
+        return hest.to_vec();
     }
-
-    let phase = acc.arg();
-    let rot = Complex32::from_polar(1.0, -phase);
-    for v in xeq_used {
-        *v *= rot;
-    }
+    h_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let pilot_interp = interpolate_complex_by_bins(&h_points, used_bins);
+    let alpha = 0.85f32;
+    hest.iter()
+        .zip(pilot_interp.iter())
+        .map(|(h_prev, h_pilot)| *h_prev * (1.0 - alpha) + *h_pilot * alpha)
+        .collect()
 }
 
 fn pilot_phase_error(
@@ -285,6 +342,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
             hest_mag_max: 0.0,
             train_recon_evm: 0.0,
             pilot_residual_evm: 0.0,
+            pilot_post_evm: 0.0,
             post_eq_evm: 0.0,
             decoded: false,
             decoded_payload_len: None,
@@ -317,6 +375,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
             hest_mag_max: 0.0,
             train_recon_evm: 0.0,
             pilot_residual_evm: 0.0,
+            pilot_post_evm: 0.0,
             post_eq_evm: 0.0,
             decoded: false,
             decoded_payload_len: None,
@@ -343,6 +402,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut pilot_eq = Vec::new();
     let mut pilot_ref = Vec::new();
+    let mut pilot_eq_post = Vec::new();
     let mut post_eq_data = Vec::new();
     let mut data_symbol_idx = 0usize;
     for (sym_idx, kind) in symbol_plan.into_iter().enumerate() {
@@ -357,17 +417,22 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
             mags.extend(hest.iter().map(|h| h.norm()));
             continue;
         }
+        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
+        let hsym = if pilot_bins.is_empty() {
+            hest.clone()
+        } else {
+            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
+        };
         let mut xeq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(regularized_equalize(y[bin], hest[k]));
+            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
         }
         if !pilot_bins.is_empty() {
-            let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
             for (k, pbin) in pilot_bins.iter().enumerate() {
                 if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
                     pilot_eq.push(xeq_used[pos]);
                     pilot_ref.push(pref[k]);
+                    pilot_eq_post.push(xeq_used[pos]);
                 }
             }
         }
@@ -382,6 +447,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let hest_mag_max = mags.iter().copied().fold(0.0f32, f32::max);
     let hest_mag_mean = mags.iter().sum::<f32>() / (mags.len() as f32);
     let pilot_residual_evm = rms_evm(&pilot_eq, &pilot_ref);
+    let pilot_post_evm = rms_evm(&pilot_eq_post, &pilot_ref);
     let post_eq_evm = decision_directed_evm(&post_eq_data, cfg.modulation);
     let decoded = decode_packet_info_baseband(&rbb_cfo, cfg);
 
@@ -395,6 +461,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
         hest_mag_max,
         train_recon_evm,
         pilot_residual_evm,
+        pilot_post_evm,
         post_eq_evm,
         decoded: decoded.is_some(),
         decoded_payload_len: decoded.map(|p| p.payload.len()),
@@ -465,14 +532,16 @@ pub fn dump_passband_constellation(
             hest = estimate_channel_from_training(&y, &used_bins, &train_known);
             continue;
         }
+        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
+        let hsym = if pilot_bins.is_empty() {
+            hest.clone()
+        } else {
+            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
+        };
         let mut xeq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
             pre_eq.push(y[bin]);
-            xeq_used.push(regularized_equalize(y[bin], hest[k]));
-        }
-        if !pilot_bins.is_empty() {
-            let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
+            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
         }
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
@@ -510,7 +579,8 @@ pub fn dump_passband_pilot_tracking(
     if used_bins.is_empty() || pilot_bins.is_empty() || data_bins.is_empty() {
         return Some(PassbandPilotTrackDump {
             pilot_phase_rad: Vec::new(),
-            pilot_evm: Vec::new(),
+            pilot_evm_pre: Vec::new(),
+            pilot_evm_post: Vec::new(),
             hest_mag_mean: Vec::new(),
             hest_mag_max: Vec::new(),
         });
@@ -535,7 +605,8 @@ pub fn dump_passband_pilot_tracking(
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut data_symbol_idx = 0usize;
     let mut pilot_phase_rad = Vec::new();
-    let mut pilot_evm = Vec::new();
+    let mut pilot_evm_pre = Vec::new();
+    let mut pilot_evm_post = Vec::new();
     let mut hest_mag_mean = Vec::new();
     let mut hest_mag_max = Vec::new();
     for (sym_idx, kind) in symbol_plan.into_iter().enumerate() {
@@ -552,32 +623,135 @@ pub fn dump_passband_pilot_tracking(
             hest_mag_max.push(mags.iter().copied().fold(0.0f32, f32::max));
             continue;
         }
+        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
+        let hsym = update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
         let mut xeq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(regularized_equalize(y[bin], hest[k]));
+            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
         }
-        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
         let phase = pilot_phase_error(&xeq_used, &used_bins, &pilot_bins, &pref).unwrap_or(0.0);
-        let mut pilot_eq = Vec::new();
+        let mut pilot_eq_pre = Vec::new();
         let mut pilot_ref = Vec::new();
-        apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
         for (k, pbin) in pilot_bins.iter().enumerate() {
             if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-                pilot_eq.push(xeq_used[pos]);
+                pilot_eq_pre.push(xeq_used[pos]);
                 pilot_ref.push(pref[k]);
             }
         }
+        let mut pilot_eq_post = Vec::new();
+        for (k, pbin) in pilot_bins.iter().enumerate() {
+            if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                let _ = k;
+                pilot_eq_post.push(xeq_used[pos]);
+            }
+        }
         pilot_phase_rad.push(phase);
-        pilot_evm.push(rms_evm(&pilot_eq, &pilot_ref));
+        pilot_evm_pre.push(rms_evm(&pilot_eq_pre, &pilot_ref));
+        pilot_evm_post.push(rms_evm(&pilot_eq_post, &pilot_ref));
         data_symbol_idx += 1;
     }
 
     Some(PassbandPilotTrackDump {
         pilot_phase_rad,
-        pilot_evm,
+        pilot_evm_pre,
+        pilot_evm_post,
         hest_mag_mean,
         hest_mag_max,
     })
+}
+
+pub fn dump_passband_bins(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+) -> Option<PassbandBinDump> {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb = &rbb_full[pre..];
+    let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
+    let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    let rbb_sync = resample_from_offset(rbb, sync_off);
+    let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
+
+    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
+    if used_bins.is_empty() || data_bins.is_empty() {
+        return None;
+    }
+    let xsync_len = 2 * cfg.sync_half_len;
+    let train_len = cfg.nfft + cfg.ncp;
+    if rbb_cfo.len() < xsync_len + train_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let train_start = xsync_len;
+    let train_no_cp = &rbb_cfo[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
+    let ytrain = fft(train_no_cp);
+    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
+    let mut hest = estimate_channel_from_training(&ytrain, &used_bins, &train_known);
+
+    let data_start = xsync_len + train_len;
+    let sym_len = cfg.nfft + cfg.ncp;
+    let max_payload_bytes = cfg.packet_payload_bytes + 16;
+    let max_bits = max_payload_bytes * 8;
+    let max_data_ofdm = max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
+    let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
+    let mut data_symbol_idx = 0usize;
+    let mut rows = Vec::new();
+    for (sym_idx, kind) in symbol_plan.into_iter().enumerate() {
+        let s0 = data_start + sym_idx * sym_len;
+        let s1 = s0 + sym_len;
+        if s1 > rbb_cfo.len() || data_symbol_idx >= 8 {
+            break;
+        }
+        let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
+        if kind == PacketSymbolKind::Training {
+            hest = estimate_channel_from_training(&y, &used_bins, &train_known);
+            continue;
+        }
+        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
+        let hsym = if pilot_bins.is_empty() {
+            hest.clone()
+        } else {
+            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
+        };
+        let mut pre_eq_used = Vec::with_capacity(used_bins.len());
+        let mut post_eq_used = Vec::with_capacity(used_bins.len());
+        for (k, &bin) in used_bins.iter().enumerate() {
+            let z = regularized_equalize(y[bin], hsym[k]);
+            pre_eq_used.push(z);
+            post_eq_used.push(z);
+        }
+        for (k, &ubin) in used_bins.iter().enumerate() {
+            let role = if pilot_bins.contains(&ubin) { "pilot" } else { "data" };
+            let reference = if role == "pilot" {
+                pilot_bins
+                    .iter()
+                    .position(|b| *b == ubin)
+                    .map(|pos| pref[pos])
+            } else {
+                None
+            };
+            rows.push(PassbandBinDumpRow {
+                data_symbol_idx: data_symbol_idx + 1,
+                used_bin: ubin,
+                role,
+                pre_eq: pre_eq_used[k],
+                post_eq: post_eq_used[k],
+                reference,
+            });
+        }
+        data_symbol_idx += 1;
+    }
+
+    Some(PassbandBinDump { rows })
 }
 
 /// Extracts Schmidl-Cox timing metrics for one passband window.
@@ -741,13 +915,15 @@ fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Pa
             hest = estimate_channel_from_training(&y, &used_bins, &train_known);
             continue;
         }
+        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
+        let hsym = if pilot_bins.is_empty() {
+            hest.clone()
+        } else {
+            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
+        };
         let mut xeq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(regularized_equalize(y[bin], hest[k]));
-        }
-        if !pilot_bins.is_empty() {
-            let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
+            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
         }
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
@@ -930,12 +1106,12 @@ fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig, off: f32) 
         let s1 = s0 + sym_len;
         if s1 <= rbb_cfo.len() {
             let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
+            let pref = known_pilot_symbols(pilot_bins.len(), 1);
+            let hsym = update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
             let mut xeq_used = Vec::with_capacity(used_bins.len());
             for (k, &bin) in used_bins.iter().enumerate() {
-                xeq_used.push(regularized_equalize(y[bin], hest[k]));
+                xeq_used.push(regularized_equalize(y[bin], hsym[k]));
             }
-            let pref = known_pilot_symbols(pilot_bins.len(), 1);
-            apply_pilot_phase_correction(&mut xeq_used, &used_bins, &pilot_bins, &pref);
             let mut pilot_eq = Vec::new();
             let mut pilot_ref = Vec::new();
             for (k, pbin) in pilot_bins.iter().enumerate() {

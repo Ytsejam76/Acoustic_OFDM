@@ -5,8 +5,7 @@ use std::error::Error;
 use clap::ValueEnum;
 use log::LevelFilter;
 use simplelog::{
-    ColorChoice, CombinedLogger, ConfigBuilder, SharedLogger, TermLogger, TerminalMode,
-    WriteLogger,
+    ColorChoice, CombinedLogger, ConfigBuilder, SharedLogger, TermLogger, TerminalMode, WriteLogger,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]

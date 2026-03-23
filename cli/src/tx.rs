@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::time::Duration;
 
-use acoustic_ofdm::{encode_single_packet_passband, OfdmConfig};
+use acoustic_ofdm::{encode_single_packet_passband, save_wav_mono_i16, OfdmConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::audio::build_output_stream;
@@ -50,6 +50,11 @@ pub(crate) fn cmd_tx(
         }
     }
 
+    if let Some(path) = &opts.dump_wav {
+        save_wav_mono_i16(std::path::Path::new(path), &tx_samples, cfg_rt.fs.round() as u32)?;
+        info_line!("Saved TX WAV: {path}");
+    }
+
     let out_stream = build_output_stream(
         &out_dev,
         &out_cfg.clone().into(),
@@ -59,8 +64,9 @@ pub(crate) fn cmd_tx(
 
     info_line!("Output device: {}", out_dev.name()?);
     info_line!(
-        "Stream config: {} Hz, out {:?}",
+        "Stream config: {} Hz, {} ch, out {:?}",
         out_cfg.sample_rate().0,
+        out_cfg.channels(),
         out_cfg.sample_format()
     );
     info_line!("Wake preamble: {}", cfg_rt.wake_preamble.as_str());

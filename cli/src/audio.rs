@@ -68,13 +68,15 @@ pub(crate) fn build_input_stream(
     prod: Arc<Mutex<HeapProd<f32>>>,
 ) -> Result<Stream, Box<dyn Error>> {
     let err_fn = |e| eprintln!("input stream error: {e}");
+    let channels = usize::from(config.channels.max(1));
     let stream = match fmt {
         SampleFormat::I16 => dev.build_input_stream(
             config,
             move |data: &[i16], _| {
                 if let Ok(mut p) = prod.lock() {
-                    for &s in data {
-                        let _ = p.try_push(i16_to_f32(s) * gain);
+                    for frame in data.chunks_exact(channels) {
+                        let mono = frame.iter().map(|&s| i16_to_f32(s)).sum::<f32>() / (channels as f32);
+                        let _ = p.try_push(mono * gain);
                     }
                 }
             },
@@ -85,8 +87,9 @@ pub(crate) fn build_input_stream(
             config,
             move |data: &[u16], _| {
                 if let Ok(mut p) = prod.lock() {
-                    for &s in data {
-                        let _ = p.try_push(u16_to_f32(s) * gain);
+                    for frame in data.chunks_exact(channels) {
+                        let mono = frame.iter().map(|&s| u16_to_f32(s)).sum::<f32>() / (channels as f32);
+                        let _ = p.try_push(mono * gain);
                     }
                 }
             },
@@ -97,8 +100,9 @@ pub(crate) fn build_input_stream(
             config,
             move |data: &[f32], _| {
                 if let Ok(mut p) = prod.lock() {
-                    for &s in data {
-                        let _ = p.try_push(s * gain);
+                    for frame in data.chunks_exact(channels) {
+                        let mono = frame.iter().copied().sum::<f32>() / (channels as f32);
+                        let _ = p.try_push(mono * gain);
                     }
                 }
             },
@@ -117,6 +121,7 @@ pub(crate) fn build_output_stream(
     mut tx: Vec<f32>,
 ) -> Result<Stream, Box<dyn Error>> {
     let err_fn = |e| eprintln!("output stream error: {e}");
+    let channels = usize::from(config.channels.max(1));
     let mut idx = 0usize;
     if tx.is_empty() {
         tx.push(0.0);
@@ -125,9 +130,12 @@ pub(crate) fn build_output_stream(
         SampleFormat::I16 => dev.build_output_stream(
             config,
             move |data: &mut [i16], _| {
-                for s in data {
+                for frame in data.chunks_exact_mut(channels) {
                     let v = if idx < tx.len() { tx[idx] } else { 0.0 };
-                    *s = f32_to_i16(v);
+                    let y = f32_to_i16(v);
+                    for s in frame {
+                        *s = y;
+                    }
                     idx += 1;
                 }
             },
@@ -137,9 +145,12 @@ pub(crate) fn build_output_stream(
         SampleFormat::U16 => dev.build_output_stream(
             config,
             move |data: &mut [u16], _| {
-                for s in data {
+                for frame in data.chunks_exact_mut(channels) {
                     let v = if idx < tx.len() { tx[idx] } else { 0.0 };
-                    *s = f32_to_u16(v);
+                    let y = f32_to_u16(v);
+                    for s in frame {
+                        *s = y;
+                    }
                     idx += 1;
                 }
             },
@@ -149,8 +160,11 @@ pub(crate) fn build_output_stream(
         SampleFormat::F32 => dev.build_output_stream(
             config,
             move |data: &mut [f32], _| {
-                for s in data {
-                    *s = if idx < tx.len() { tx[idx] } else { 0.0 };
+                for frame in data.chunks_exact_mut(channels) {
+                    let y = if idx < tx.len() { tx[idx] } else { 0.0 };
+                    for s in frame {
+                        *s = y;
+                    }
                     idx += 1;
                 }
             },

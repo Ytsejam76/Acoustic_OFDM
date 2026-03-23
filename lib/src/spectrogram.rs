@@ -54,14 +54,15 @@ fn window_samples(n: usize, kind: SpectrogramWindow) -> Vec<f32> {
     }
 }
 
-fn viridis_like(t: f32) -> RGBColor {
+fn jet_like(t: f32) -> RGBColor {
     let t = t.clamp(0.0, 1.0);
     let anchors = [
-        (0.0, (13.0, 8.0, 135.0)),
-        (0.25, (59.0, 82.0, 139.0)),
-        (0.5, (33.0, 145.0, 140.0)),
-        (0.75, (94.0, 201.0, 98.0)),
-        (1.0, (253.0, 231.0, 37.0)),
+        (0.0, (0.0, 0.0, 131.0)),
+        (0.125, (0.0, 60.0, 170.0)),
+        (0.375, (5.0, 255.0, 255.0)),
+        (0.625, (255.0, 255.0, 0.0)),
+        (0.875, (250.0, 0.0, 0.0)),
+        (1.0, (128.0, 0.0, 0.0)),
     ];
     for w in anchors.windows(2) {
         let (t0, c0) = w[0];
@@ -72,7 +73,7 @@ fn viridis_like(t: f32) -> RGBColor {
             return RGBColor(lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
         }
     }
-    RGBColor(253, 231, 37)
+    RGBColor(128, 0, 0)
 }
 
 /// Saves a human-readable spectrogram PNG for a mono waveform.
@@ -106,7 +107,7 @@ pub fn save_spectrogram_png_with_options(
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(nfft);
     let n_frames = 1 + (x.len() - nfft) / hop;
-    let n_bins = nfft / 2;
+    let n_bins = nfft / 2 + 1;
     let t_max = ((n_frames - 1) * hop + nfft) as f32 / fs;
     let f_max_khz = fs / 2000.0;
 
@@ -158,7 +159,7 @@ pub fn save_spectrogram_png_with_options(
         for k in 0..n_bins {
             let db = spec[t * n_bins + k];
             let norm = ((db - floor_db) / (max_db - floor_db).max(1e-6)).clamp(0.0, 1.0);
-            let color = viridis_like(norm).filled();
+            let color = jet_like(norm).filled();
             let x0 = t as f32 * dt;
             let x1 = (t as f32 + 1.0) * dt;
             let y0 = k as f32 * df_khz;
@@ -181,7 +182,7 @@ pub fn save_spectrogram_png_with_options(
         let y1 = bar_bottom - (((i + 1) as i32) * (bar_bottom - bar_top) / (n_steps as i32));
         legend_area.draw(&Rectangle::new(
             [(bar_left, y1), (bar_right, y0.max(y1 + 1))],
-            viridis_like((i as f32) / ((n_steps - 1) as f32)).filled(),
+            jet_like((i as f32) / ((n_steps - 1) as f32)).filled(),
         ))?;
     }
     legend_area.draw(&Rectangle::new(

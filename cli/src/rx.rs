@@ -52,8 +52,9 @@ pub(crate) fn cmd_rx(
 
     info_line!("Input device : {}", in_dev.name()?);
     info_line!(
-        "Stream config: {} Hz, in {:?}",
+        "Stream config: {} Hz, {} ch, in {:?}",
         in_cfg.sample_rate().0,
+        in_cfg.channels(),
         in_cfg.sample_format()
     );
     info_line!("RX detector: wake-correlation-v2");

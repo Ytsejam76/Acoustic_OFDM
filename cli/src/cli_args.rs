@@ -67,6 +67,7 @@ pub(crate) enum Commands {
     Encode(EncodeCmd),
     Decode(DecodeCmd),
     Roundtrip(RoundtripCmd),
+    Spectrogram(SpectrogramCmd),
     Rx(RxCmd),
     Tx(TxCmd),
 }
@@ -99,6 +100,20 @@ pub(crate) struct RoundtripCmd {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SpectrogramCmd {
+    #[arg(short = 'i', long)]
+    pub(crate) in_wav: String,
+    #[arg(short = 'o', long)]
+    pub(crate) out_png: String,
+    #[arg(long, default_value_t = 512)]
+    pub(crate) spectrogram_nfft: usize,
+    #[arg(long, default_value_t = 128)]
+    pub(crate) spectrogram_hop: usize,
+    #[arg(long, value_enum, default_value_t = SpectrogramWindowArg::Hann)]
+    pub(crate) spectrogram_window: SpectrogramWindowArg,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct TxCmd {
     #[command(flatten)]
     pub(crate) common: CommonCfgArgs,
@@ -112,6 +127,8 @@ pub(crate) struct TxCmd {
     pub(crate) repeats: Option<usize>,
     #[arg(short = 'G', long)]
     pub(crate) gap_sec: Option<f32>,
+    #[arg(short = 'W', long)]
+    pub(crate) dump_wav: Option<String>,
     #[arg(short = 'o', long)]
     pub(crate) oracle: bool,
     #[arg(short = 'v', long)]
@@ -223,19 +240,43 @@ pub(crate) fn resolved_log_level(explicit: Option<LogLevelArg>, verbose: bool) -
 }
 
 pub(crate) fn apply_tx_profile_cfg(cfg: &mut OfdmConfig, cmd: &TxCmd) {
+    match cmd.profile {
+        LiveProfileArg::Legacy4481483 => {
+            cfg.fc = 17_000.0;
+            cfg.used_bins = vec![2, 3, 4, 5];
+            cfg.pilot_bins = vec![2, 4];
+            cfg.retrain_interval_data_symbols = Some(1);
+            cfg.terminal_training_symbol = true;
+            cfg.wake_freq = 16_500.0;
+            cfg.wake_guard_ms = 15.0;
+        }
+        LiveProfileArg::Standard | LiveProfileArg::LiveDebug => {}
+    }
     if cmd.common.wake_preamble.is_none() {
         cfg.wake_preamble = match cmd.profile {
             LiveProfileArg::Standard => cfg.wake_preamble,
-            LiveProfileArg::LiveDebug => WakePreamble::Gold,
+            LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => WakePreamble::Tone,
         };
     }
 }
 
 pub(crate) fn apply_rx_profile_cfg(cfg: &mut OfdmConfig, cmd: &RxCmd) {
+    match cmd.profile {
+        LiveProfileArg::Legacy4481483 => {
+            cfg.fc = 17_000.0;
+            cfg.used_bins = vec![2, 3, 4, 5];
+            cfg.pilot_bins = vec![2, 4];
+            cfg.retrain_interval_data_symbols = Some(1);
+            cfg.terminal_training_symbol = true;
+            cfg.wake_freq = 16_500.0;
+            cfg.wake_guard_ms = 15.0;
+        }
+        LiveProfileArg::Standard | LiveProfileArg::LiveDebug => {}
+    }
     if cmd.common.wake_preamble.is_none() {
         cfg.wake_preamble = match cmd.profile {
             LiveProfileArg::Standard => cfg.wake_preamble,
-            LiveProfileArg::LiveDebug => WakePreamble::Gold,
+            LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => WakePreamble::Tone,
         };
     }
 }
@@ -253,6 +294,15 @@ pub(crate) fn rx_audio_opts(cmd: &RxCmd) -> AudioOpts {
                 false,
             ),
             LiveProfileArg::LiveDebug => (
+                5.0,
+                0.2,
+                Some("/tmp/rx_capture.wav".to_string()),
+                true,
+                "/tmp/rx_spectrogram.png".to_string(),
+                true,
+                true,
+            ),
+            LiveProfileArg::Legacy4481483 => (
                 5.0,
                 0.2,
                 Some("/tmp/rx_capture.wav".to_string()),
@@ -295,6 +345,7 @@ pub(crate) fn tx_audio_opts(cmd: &TxCmd) -> AudioOpts {
     let (spk_gain, pre_delay_sec, repeats, gap_sec, oracle, verbose) = match cmd.profile {
         LiveProfileArg::Standard => (1.0, 0.2, 3, 0.35, false, false),
         LiveProfileArg::LiveDebug => (0.2, 0.5, 5, 0.35, true, false),
+        LiveProfileArg::Legacy4481483 => (0.2, 0.5, 5, 0.35, true, false),
     };
     AudioOpts {
         duration_sec: 10.0,
@@ -306,7 +357,7 @@ pub(crate) fn tx_audio_opts(cmd: &TxCmd) -> AudioOpts {
         input_filter: false,
         input_hp_hz: 12_000.0,
         input_lp_hz: 19_000.0,
-        dump_wav: None,
+        dump_wav: cmd.dump_wav.clone(),
         spectrogram: false,
         spectrogram_path: "/tmp/rx_spectrogram.png".to_string(),
         spectrogram_opts: SpectrogramOptions::default(),

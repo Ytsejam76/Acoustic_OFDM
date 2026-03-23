@@ -7,19 +7,25 @@ pub enum LiveProfileArg {
     Standard,
     #[value(name = "live-debug")]
     LiveDebug,
+    #[value(name = "legacy-4481483")]
+    Legacy4481483,
 }
 
 pub fn tx_default_log_file(profile: LiveProfileArg) -> Option<String> {
     match profile {
         LiveProfileArg::Standard => None,
-        LiveProfileArg::LiveDebug => Some("acoustic_ofdm_tx.log".to_string()),
+        LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => {
+            Some("acoustic_ofdm_tx.log".to_string())
+        }
     }
 }
 
 pub fn rx_default_log_file(profile: LiveProfileArg) -> Option<String> {
     match profile {
         LiveProfileArg::Standard => None,
-        LiveProfileArg::LiveDebug => Some("acoustic_ofdm_rx.log".to_string()),
+        LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => {
+            Some("acoustic_ofdm_rx.log".to_string())
+        }
     }
 }
 

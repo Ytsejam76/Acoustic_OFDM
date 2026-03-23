@@ -14,7 +14,8 @@ mod tx;
 
 use acoustic_ofdm::{
     decode_single_packet_passband, encode_single_packet_passband, load_wav_mono_f32,
-    save_wav_mono_i16, OfdmConfig,
+    save_spectrogram_png, save_spectrogram_png_with_options, save_wav_mono_i16, OfdmConfig,
+    SpectrogramOptions,
 };
 use clap::Parser;
 use live_profile::{rx_default_log_file, tx_default_log_file};
@@ -62,6 +63,27 @@ fn cmd_decode(in_path: &Path, cfg: &OfdmConfig, stdout_raw: bool) -> Result<(), 
     Ok(())
 }
 
+fn cmd_spectrogram(cmd: SpectrogramCmd) -> Result<(), Box<dyn Error>> {
+    let (samples, sr) = load_wav_mono_f32(Path::new(&cmd.in_wav))?;
+    let opts = SpectrogramOptions {
+        nfft: cmd.spectrogram_nfft,
+        hop: cmd.spectrogram_hop,
+        window: cmd.spectrogram_window.into(),
+    };
+    let default_opts = SpectrogramOptions::default();
+    let out = Path::new(&cmd.out_png);
+    if opts.nfft == default_opts.nfft
+        && opts.hop == default_opts.hop
+        && opts.window == default_opts.window
+    {
+        save_spectrogram_png(out, &samples, sr as f32)?;
+    } else {
+        save_spectrogram_png_with_options(out, &samples, sr as f32, opts)?;
+    }
+    println!("Wrote spectrogram: {}", out.display());
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -83,6 +105,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let payload = payload_from_arg_or_stdin(&cmd.payload_text)?;
             cmd_encode(Path::new(&cmd.wav_path), &payload, &cfg)?;
             cmd_decode(Path::new(&cmd.wav_path), &cfg, cmd.stdout)?;
+        }
+        Commands::Spectrogram(cmd) => {
+            cmd_spectrogram(cmd)?;
         }
         Commands::Rx(cmd) => {
             let mut cfg = OfdmConfig::default();
@@ -192,6 +217,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_spectrogram_options() {
+        let cli = Cli::try_parse_from([
+            "acoustic_ofdm_cli",
+            "spectrogram",
+            "--in-wav",
+            "/tmp/in.wav",
+            "--out-png",
+            "/tmp/out.png",
+            "--spectrogram-nfft",
+            "1024",
+            "--spectrogram-hop",
+            "256",
+            "--spectrogram-window",
+            "blackman",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Commands::Spectrogram(cmd) => {
+                assert_eq!(cmd.in_wav, "/tmp/in.wav");
+                assert_eq!(cmd.out_png, "/tmp/out.png");
+                assert_eq!(cmd.spectrogram_nfft, 1024);
+                assert_eq!(cmd.spectrogram_hop, 256);
+                assert_eq!(cmd.spectrogram_window, crate::cli_args::SpectrogramWindowArg::Blackman);
+            }
+            _ => panic!("expected spectrogram"),
+        }
+    }
+
+    #[test]
     fn parse_rx_options() {
         let cli = Cli::try_parse_from([
             "acoustic_ofdm_cli",
@@ -282,7 +336,7 @@ mod tests {
                 let mut cfg = OfdmConfig::default();
                 apply_tx_profile_cfg(&mut cfg, &cmd);
                 let opts = tx_audio_opts(&cmd);
-                assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
+                assert_eq!(cfg.wake_preamble, WakePreamble::Tone);
                 assert!((opts.spk_gain - 0.2).abs() < 1e-6);
                 assert!((opts.pre_delay_sec - 0.5).abs() < 1e-6);
                 assert_eq!(opts.repeats, 5);
@@ -305,7 +359,7 @@ mod tests {
                 let mut cfg = OfdmConfig::default();
                 apply_rx_profile_cfg(&mut cfg, &cmd);
                 let opts = rx_audio_opts(&cmd);
-                assert_eq!(cfg.wake_preamble, WakePreamble::Gold);
+                assert_eq!(cfg.wake_preamble, WakePreamble::Tone);
                 assert!((opts.duration_sec - 5.0).abs() < 1e-6);
                 assert!((opts.mic_gain - 0.2).abs() < 1e-6);
                 assert_eq!(opts.dump_wav.as_deref(), Some("/tmp/rx_capture.wav"));

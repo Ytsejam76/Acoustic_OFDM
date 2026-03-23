@@ -463,7 +463,11 @@ pub(crate) fn ranked_offset_hypotheses(
     dedup
 }
 
-pub(crate) fn quick_realtime_decode(rx_raw: &[f32], rx_sync: &[f32], cfg: &OfdmConfig) -> Option<Vec<u8>> {
+pub(crate) fn quick_realtime_decode(
+    rx_raw: &[f32],
+    rx_sync: &[f32],
+    cfg: &OfdmConfig,
+) -> Option<Vec<u8>> {
     let est_pkt = estimated_packet_len_samples(cfg, None);
     let pad = ((0.050 * cfg.fs).round() as usize).max(1);
     if rx_raw.len() < est_pkt + pad || rx_sync.len() < est_pkt + pad {

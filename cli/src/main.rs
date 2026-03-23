@@ -320,7 +320,6 @@ mod tests {
             _ => panic!("expected rx"),
         }
     }
-
 }
 
 // vim: set ts=4 sw=4 et:

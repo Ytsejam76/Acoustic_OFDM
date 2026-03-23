@@ -41,7 +41,9 @@ fn window_samples(n: usize, kind: SpectrogramWindow) -> Vec<f32> {
             .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32)).cos())
             .collect(),
         SpectrogramWindow::Hamming => (0..n)
-            .map(|i| 0.54 - 0.46 * (2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32)).cos())
+            .map(|i| {
+                0.54 - 0.46 * (2.0 * std::f32::consts::PI * (i as f32) / ((n - 1) as f32)).cos()
+            })
             .collect(),
         SpectrogramWindow::Blackman => (0..n)
             .map(|i| {
@@ -67,11 +69,7 @@ fn viridis_like(t: f32) -> RGBColor {
         if t <= t1 {
             let a = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
             let lerp = |x0: f32, x1: f32| (x0 + a * (x1 - x0)).round() as u8;
-            return RGBColor(
-                lerp(c0.0, c1.0),
-                lerp(c0.1, c1.1),
-                lerp(c0.2, c1.2),
-            );
+            return RGBColor(lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
         }
     }
     RGBColor(253, 231, 37)
@@ -191,7 +189,13 @@ pub fn save_spectrogram_png_with_options(
         ShapeStyle::from(&BLACK).stroke_width(1),
     ))?;
 
-    let tick_vals = [max_db, max_db - 20.0, max_db - 40.0, max_db - 60.0, floor_db];
+    let tick_vals = [
+        max_db,
+        max_db - 20.0,
+        max_db - 40.0,
+        max_db - 60.0,
+        floor_db,
+    ];
     for &db in &tick_vals {
         let a = ((db - floor_db) / (max_db - floor_db).max(1e-6)).clamp(0.0, 1.0);
         let y = bar_bottom - ((a * ((bar_bottom - bar_top) as f32)).round() as i32);

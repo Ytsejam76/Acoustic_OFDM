@@ -3,7 +3,10 @@
 use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::config::{Modulation, OfdmConfig, WakePreamble};
-use crate::packet::{bits_to_bytes, build_packet_bytes, bytes_to_bits, modulation_from_id, parse_packet_bytes, split_payload, PacketInfo};
+use crate::packet::{
+    bits_to_bytes, build_packet_bytes, bytes_to_bits, modulation_from_id, parse_packet_bytes,
+    split_payload, PacketInfo,
+};
 
 #[derive(Clone, Debug)]
 pub struct EncodedPacketMeta {
@@ -123,7 +126,11 @@ fn update_channel_from_pilots(
     pref: &[Complex32],
     hest: &[Complex32],
 ) -> Vec<Complex32> {
-    if used_bins.is_empty() || hest.len() != used_bins.len() || pilot_bins.is_empty() || pref.is_empty() {
+    if used_bins.is_empty()
+        || hest.len() != used_bins.len()
+        || pilot_bins.is_empty()
+        || pref.is_empty()
+    {
         return hest.to_vec();
     }
 
@@ -267,7 +274,10 @@ pub fn encode_payload(payload: &[u8], cfg: &OfdmConfig) -> EncodedBurst {
     }
 
     normalize_in_place(&mut audio, 0.85);
-    EncodedBurst { audio, packet_meta: meta }
+    EncodedBurst {
+        audio,
+        packet_meta: meta,
+    }
 }
 
 /// Decodes an encoded burst using oracle packet boundaries and baseband symbols.
@@ -384,7 +394,8 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
 
     let train_start = xsync_len;
     let train_no_cp = &rbb_cfo[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
-    let train_rms = (train_no_cp.iter().map(|v| v.norm_sqr()).sum::<f32>() / (train_no_cp.len() as f32)).sqrt();
+    let train_rms =
+        (train_no_cp.iter().map(|v| v.norm_sqr()).sum::<f32>() / (train_no_cp.len() as f32)).sqrt();
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = estimate_channel_from_training(&ytrain, &used_bins, &train_known);
@@ -398,7 +409,8 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
     let max_bits = max_payload_bytes * 8;
-    let max_data_ofdm = max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
+    let max_data_ofdm =
+        max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut pilot_eq = Vec::new();
     let mut pilot_ref = Vec::new();
@@ -518,7 +530,8 @@ pub fn dump_passband_constellation(
     let mut post_eq = Vec::new();
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
     let max_bits = max_payload_bytes * 8;
-    let max_data_ofdm = max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
+    let max_data_ofdm =
+        max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut data_symbol_idx = 0usize;
     for (sym_idx, kind) in symbol_plan.into_iter().enumerate() {
@@ -601,7 +614,8 @@ pub fn dump_passband_pilot_tracking(
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
     let max_bits = max_payload_bytes * 8;
-    let max_data_ofdm = max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
+    let max_data_ofdm =
+        max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut data_symbol_idx = 0usize;
     let mut pilot_phase_rad = Vec::new();
@@ -660,10 +674,7 @@ pub fn dump_passband_pilot_tracking(
     })
 }
 
-pub fn dump_passband_bins(
-    pkt_audio: &[f32],
-    cfg: &OfdmConfig,
-) -> Option<PassbandBinDump> {
+pub fn dump_passband_bins(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandBinDump> {
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
@@ -701,7 +712,8 @@ pub fn dump_passband_bins(
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
     let max_bits = max_payload_bytes * 8;
-    let max_data_ofdm = max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
+    let max_data_ofdm =
+        max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut data_symbol_idx = 0usize;
     let mut rows = Vec::new();
@@ -730,7 +742,11 @@ pub fn dump_passband_bins(
             post_eq_used.push(z);
         }
         for (k, &ubin) in used_bins.iter().enumerate() {
-            let role = if pilot_bins.contains(&ubin) { "pilot" } else { "data" };
+            let role = if pilot_bins.contains(&ubin) {
+                "pilot"
+            } else {
+                "data"
+            };
             let reference = if role == "pilot" {
                 pilot_bins
                     .iter()
@@ -989,10 +1005,7 @@ fn find_repeated_half_sync_offset(rbb: &[Complex32], cfg: &OfdmConfig) -> usize 
     }
     let best_m = metrics.iter().copied().fold(-1.0f32, f32::max);
     let thresh = 0.97 * best_m.max(0.0);
-    metrics
-        .iter()
-        .position(|&m| m >= thresh)
-        .unwrap_or(0)
+    metrics.iter().position(|&m| m >= thresh).unwrap_or(0)
 }
 
 fn repeated_half_sync_metrics(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<f32> {
@@ -1224,7 +1237,13 @@ fn map_bits(bits: &[u8], modulation: Modulation) -> Vec<Complex32> {
     match modulation {
         Modulation::Bpsk => bits
             .iter()
-            .map(|&b| if b == 0 { Complex32::new(1.0, 0.0) } else { Complex32::new(-1.0, 0.0) })
+            .map(|&b| {
+                if b == 0 {
+                    Complex32::new(1.0, 0.0)
+                } else {
+                    Complex32::new(-1.0, 0.0)
+                }
+            })
             .collect(),
         Modulation::Qpsk => {
             let mut out = Vec::with_capacity(bits.len().div_ceil(2));
@@ -1274,7 +1293,13 @@ fn hard_slice_symbols(syms: &[Complex32], modulation: Modulation) -> Vec<Complex
     match modulation {
         Modulation::Bpsk => syms
             .iter()
-            .map(|s| if s.re < 0.0 { Complex32::new(-1.0, 0.0) } else { Complex32::new(1.0, 0.0) })
+            .map(|s| {
+                if s.re < 0.0 {
+                    Complex32::new(-1.0, 0.0)
+                } else {
+                    Complex32::new(1.0, 0.0)
+                }
+            })
             .collect(),
         Modulation::Qpsk => syms
             .iter()
@@ -1297,7 +1322,13 @@ fn hard_slice_symbols(syms: &[Complex32], modulation: Modulation) -> Vec<Complex
 fn known_training_symbols(n: usize, modulation: Modulation) -> Vec<Complex32> {
     match modulation {
         Modulation::Bpsk => (0..n)
-            .map(|i| if i % 2 == 0 { Complex32::new(1.0, 0.0) } else { Complex32::new(-1.0, 0.0) })
+            .map(|i| {
+                if i % 2 == 0 {
+                    Complex32::new(1.0, 0.0)
+                } else {
+                    Complex32::new(-1.0, 0.0)
+                }
+            })
             .collect(),
         Modulation::Qpsk => {
             let base = [
@@ -1337,7 +1368,9 @@ fn known_pilot_symbols(n: usize, sym_idx: usize) -> Vec<Complex32> {
 /// - `(Vec<usize>, Vec<usize>, Vec<usize>)`: `(used_bins, pilot_bins, data_bins)`.
 fn ofdm_bin_plan(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
     let (used_bins, pilot_candidates) = resolve_bins_with_base_freq(cfg);
-    let pilots_on = cfg.use_pilots.unwrap_or(matches!(cfg.modulation, Modulation::Qpsk));
+    let pilots_on = cfg
+        .use_pilots
+        .unwrap_or(matches!(cfg.modulation, Modulation::Qpsk));
     let pilot_bins = if pilots_on {
         let mut pilots = pilot_candidates
             .iter()
@@ -1420,7 +1453,8 @@ fn known_sync_half(cfg: &OfdmConfig) -> Vec<Complex32> {
         let mut acc = Complex32::new(0.0, 0.0);
         for (i, &bin) in used_bins.iter().enumerate() {
             let phase0 = std::f32::consts::FRAC_PI_2 * (((3 * i + 1) % 4) as f32);
-            let phase = phase0 + 2.0 * std::f32::consts::PI * (bin as f32) * (n as f32) / (cfg.nfft as f32);
+            let phase =
+                phase0 + 2.0 * std::f32::consts::PI * (bin as f32) * (n as f32) / (cfg.nfft as f32);
             acc += Complex32::from_polar(1.0, phase);
         }
         out.push(acc);

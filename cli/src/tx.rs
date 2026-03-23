@@ -10,7 +10,11 @@ use crate::audio::build_output_stream;
 use crate::cli_args::AudioOpts;
 use crate::info_line;
 
-pub(crate) fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Result<(), Box<dyn Error>> {
+pub(crate) fn cmd_tx(
+    payload: &[u8],
+    cfg: &OfdmConfig,
+    opts: &AudioOpts,
+) -> Result<(), Box<dyn Error>> {
     if payload.len() > cfg.packet_payload_bytes {
         return Err(format!(
             "payload too long for single-packet app: {} > {}",
@@ -65,7 +69,9 @@ pub(crate) fn cmd_tx(payload: &[u8], cfg: &OfdmConfig, opts: &AudioOpts) -> Resu
     }
     info_line!("Transmit samples: {}", tx.len());
     if opts.verbose {
-        let peak = tx.iter().fold(0.0f32, |m, &v| if v.abs() > m { v.abs() } else { m });
+        let peak = tx
+            .iter()
+            .fold(0.0f32, |m, &v| if v.abs() > m { v.abs() } else { m });
         info_line!(
             "TX diagnostics: duration={:.3}s peak={peak:.3} spk_gain={:.3} repeats={} pre_delay={:.2}s gap={:.2}s",
             (tx.len() as f32) / cfg_rt.fs,

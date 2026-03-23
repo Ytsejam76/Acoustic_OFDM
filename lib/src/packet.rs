@@ -36,7 +36,12 @@ pub fn split_payload(payload: &[u8], chunk_size: usize) -> Vec<Vec<u8>> {
 /// - `cfg`: modem configuration (session/modulation fields used).
 /// Returns:
 /// - `Vec<u8>`: serialized packet bytes.
-pub fn build_packet_bytes(payload: &[u8], frag_index: u8, frag_count: u8, cfg: &OfdmConfig) -> Vec<u8> {
+pub fn build_packet_bytes(
+    payload: &[u8],
+    frag_index: u8,
+    frag_count: u8,
+    cfg: &OfdmConfig,
+) -> Vec<u8> {
     let mut body = Vec::with_capacity(11 + payload.len());
     body.extend_from_slice(&[0xA5, 0x5A]);
     body.push(1); // version

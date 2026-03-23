@@ -11,7 +11,11 @@ use std::path::Path;
 /// - `sample_rate`: sample rate in Hz.
 /// Returns:
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
-pub fn save_wav_mono_i16(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), Box<dyn Error>> {
+pub fn save_wav_mono_i16(
+    path: &Path,
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<(), Box<dyn Error>> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,

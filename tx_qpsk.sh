@@ -11,7 +11,7 @@ exec cargo run -p acoustic_ofdm_cli -- \
   tx \
   --profile live-debug \
   --modulation qpsk \
-  --spk-gain 0.8 \
+  --spk-gain 0.6 \
   --oracle \
   --pre-delay-sec 0.05 \
   --repeats 8 \

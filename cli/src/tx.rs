@@ -13,6 +13,14 @@ use crate::info_line;
 const CAL_TONE_SEC: f32 = 0.5;
 const CAL_TONE_GAIN: f32 = 0.2;
 
+fn calibration_frequencies(fc: f32, fs: f32) -> [f32; 3] {
+    let nyquist = 0.5 * fs;
+    let low = (fc - 3_000.0).clamp(1_000.0, 0.9 * nyquist);
+    let mid = fc.clamp(1_000.0, 0.9 * nyquist);
+    let high = (fc + 3_000.0).clamp(1_000.0, 0.9 * nyquist);
+    [low, mid, high]
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TxPlan {
     pub(crate) fs: f32,
@@ -53,6 +61,7 @@ pub(crate) fn build_tx_plan(
     let mut scheduled = Vec::with_capacity(total_n);
     let mut burst_starts_sec = Vec::with_capacity(opts.repeats);
     if cal_n > 0 {
+        let cal_freqs = calibration_frequencies(cfg_rt.fc, fs);
         let ramp = ((0.01 * fs).round() as usize).max(1).min(cal_n / 4);
         let seg_len = (cal_n / 3).max(1);
         for n in 0..cal_n {
@@ -65,11 +74,11 @@ pub(crate) fn build_tx_plan(
                 1.0
             };
             let f = if n < seg_len {
-                0.5 * cfg_rt.fc
+                cal_freqs[0]
             } else if n < 2 * seg_len {
-                cfg_rt.fc
+                cal_freqs[1]
             } else {
-                2.0 * cfg_rt.fc
+                cal_freqs[2]
             };
             scheduled.push(CAL_TONE_GAIN * env * (2.0 * std::f32::consts::PI * f * t).sin());
         }
@@ -136,6 +145,7 @@ pub(crate) fn cmd_tx(
     }
     info_line!("Transmit samples: {}", plan.packet.len());
     if opts.verbose {
+        let cal_freqs = calibration_frequencies(cfg.fc, plan.fs);
         let peak = plan
             .packet
             .iter()
@@ -144,9 +154,9 @@ pub(crate) fn cmd_tx(
             "TX diagnostics: duration={:.3}s peak={peak:.3} cal_tones_seq={:.2}s@[{:.1},{:.1},{:.1}]Hz spk_gain={:.3} repeats={} pre_delay={:.2}s gap={:.2}s",
             (plan.packet.len() as f32) / plan.fs,
             CAL_TONE_SEC,
-            0.5 * cfg.fc,
-            cfg.fc,
-            2.0 * cfg.fc,
+            cal_freqs[0],
+            cal_freqs[1],
+            cal_freqs[2],
             opts.spk_gain,
             opts.repeats,
             opts.pre_delay_sec,

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 OUT_DIR="$ROOT/output"
-DURATION="10"
+DURATION="4"
 WAV="$OUT_DIR/rx_capture_qpsk.wav"
 LOG="acoustic_ofdm_mic_roundtrip_qpsk.log"
 
@@ -38,9 +38,9 @@ exec cargo run -p acoustic_ofdm_cli -- \
   --profile live-debug \
   --modulation qpsk \
   --duration-sec "$DURATION" \
-  --mic-gain 0.8 \
-  --spk-gain 0.8 \
-  --repeats 8 \
+  --mic-gain 0.6 \
+  --spk-gain 0.6 \
+  --repeats 1 \
   --gap-sec 0.15 \
   --pre-delay-sec 0.05 \
   --oracle \

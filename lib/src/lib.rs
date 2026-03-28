@@ -9,8 +9,8 @@ pub mod packet;
 pub mod spectrogram;
 pub mod wav_io;
 
-pub use config::{Modulation, OfdmConfig, WakePreamble};
-pub use constellation::save_constellation_comparison_png;
+pub use config::{EqualizerMode, Modulation, OfdmConfig, WakePreamble};
+pub use constellation::{save_channel_compare_png, save_constellation_comparison_png};
 pub use baseband::{
     decode_packet_baseband, encode_single_packet_baseband, expected_single_packet_data_symbols,
     recover_single_packet_data_symbols,
@@ -19,11 +19,11 @@ pub use modem::{
     decode_encoded_burst_oracle, decode_single_packet_passband,
     decode_single_packet_passband_with_sync,
     diagnose_passband_window, diagnose_passband_window_with_sync, dump_passband_bins,
-    dump_passband_bins_with_sync, dump_passband_constellation,
+    dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync, dump_passband_constellation,
     dump_passband_pilot_tracking, dump_passband_sync_metric, encode_payload,
     encode_single_packet_passband, encode_single_packet_passband_body, EncodedBurst,
-    PassbandBinDump, PassbandBinDumpRow, PassbandConstellationDump, PassbandDiagnostics,
-    PassbandPilotTrackDump, PassbandSyncDump,
+    PassbandBinDump, PassbandBinDumpRow, PassbandChannelCompareDump, PassbandChannelCompareRow,
+    PassbandConstellationDump, PassbandDiagnostics, PassbandPilotTrackDump, PassbandSyncDump,
 };
 pub use spectrogram::{
     save_spectrogram_png, save_spectrogram_png_with_options, SpectrogramOptions, SpectrogramWindow,

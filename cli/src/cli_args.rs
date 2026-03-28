@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::io::Read;
 
-use acoustic_ofdm::{Modulation, OfdmConfig, SpectrogramOptions, SpectrogramWindow, WakePreamble};
+use acoustic_ofdm::{EqualizerMode, Modulation, OfdmConfig, SpectrogramOptions, SpectrogramWindow, WakePreamble};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::live_profile::LiveProfileArg;
@@ -21,6 +21,12 @@ pub(crate) enum WakePreambleArg {
 pub(crate) enum ModulationArg {
     Bpsk,
     Qpsk,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum EqualizerModeArg {
+    TrainingPilot,
+    PilotOnly,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -62,12 +68,23 @@ impl From<ModulationArg> for Modulation {
     }
 }
 
+impl From<EqualizerModeArg> for EqualizerMode {
+    fn from(value: EqualizerModeArg) -> Self {
+        match value {
+            EqualizerModeArg::TrainingPilot => EqualizerMode::TrainingPilot,
+            EqualizerModeArg::PilotOnly => EqualizerMode::PilotOnly,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args, Default)]
 pub(crate) struct CommonCfgArgs {
     #[arg(short = 'b', long)]
     pub(crate) base_freq_hz: Option<f32>,
     #[arg(short = 'm', long, value_enum)]
     pub(crate) modulation: Option<ModulationArg>,
+    #[arg(long, value_enum)]
+    pub(crate) equalizer_mode: Option<EqualizerModeArg>,
     #[arg(short = 'w', long, value_enum)]
     pub(crate) wake_preamble: Option<WakePreambleArg>,
 }
@@ -328,6 +345,9 @@ pub(crate) fn apply_common_cfg(
     if let Some(m) = common.modulation {
         cfg.modulation = m.into();
     }
+    if let Some(m) = common.equalizer_mode {
+        cfg.equalizer_mode = m.into();
+    }
     if let Some(w) = common.wake_preamble {
         cfg.wake_preamble = w.into();
     }
@@ -342,8 +362,12 @@ pub(crate) fn resolved_log_level(explicit: Option<LogLevelArg>, verbose: bool) -
     })
 }
 
-pub(crate) fn apply_tx_profile_cfg(cfg: &mut OfdmConfig, cmd: &TxCmd) {
-    match cmd.profile {
+pub(crate) fn apply_profile_cfg(
+    cfg: &mut OfdmConfig,
+    profile: LiveProfileArg,
+    apply_default_wake: bool,
+) {
+    match profile {
         LiveProfileArg::Legacy4481483 => {
             cfg.fc = 17_000.0;
             cfg.used_bins = vec![2, 3, 4, 5];
@@ -355,54 +379,24 @@ pub(crate) fn apply_tx_profile_cfg(cfg: &mut OfdmConfig, cmd: &TxCmd) {
         }
         LiveProfileArg::Standard | LiveProfileArg::LiveDebug => {}
     }
-    if cmd.common.wake_preamble.is_none() {
-        cfg.wake_preamble = match cmd.profile {
+    if apply_default_wake {
+        cfg.wake_preamble = match profile {
             LiveProfileArg::Standard => cfg.wake_preamble,
             LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => WakePreamble::Tone,
         };
     }
+}
+
+pub(crate) fn apply_tx_profile_cfg(cfg: &mut OfdmConfig, cmd: &TxCmd) {
+    apply_profile_cfg(cfg, cmd.profile, cmd.common.wake_preamble.is_none());
 }
 
 pub(crate) fn apply_rx_profile_cfg(cfg: &mut OfdmConfig, cmd: &RxCmd) {
-    match cmd.profile {
-        LiveProfileArg::Legacy4481483 => {
-            cfg.fc = 17_000.0;
-            cfg.used_bins = vec![2, 3, 4, 5];
-            cfg.pilot_bins = vec![2, 4];
-            cfg.retrain_interval_data_symbols = Some(1);
-            cfg.terminal_training_symbol = true;
-            cfg.wake_freq = 16_500.0;
-            cfg.wake_guard_ms = 15.0;
-        }
-        LiveProfileArg::Standard | LiveProfileArg::LiveDebug => {}
-    }
-    if cmd.common.wake_preamble.is_none() {
-        cfg.wake_preamble = match cmd.profile {
-            LiveProfileArg::Standard => cfg.wake_preamble,
-            LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => WakePreamble::Tone,
-        };
-    }
+    apply_profile_cfg(cfg, cmd.profile, cmd.common.wake_preamble.is_none());
 }
 
 pub(crate) fn apply_mic_roundtrip_profile_cfg(cfg: &mut OfdmConfig, cmd: &MicRoundtripCmd) {
-    match cmd.profile {
-        LiveProfileArg::Legacy4481483 => {
-            cfg.fc = 17_000.0;
-            cfg.used_bins = vec![2, 3, 4, 5];
-            cfg.pilot_bins = vec![2, 4];
-            cfg.retrain_interval_data_symbols = Some(1);
-            cfg.terminal_training_symbol = true;
-            cfg.wake_freq = 16_500.0;
-            cfg.wake_guard_ms = 15.0;
-        }
-        LiveProfileArg::Standard | LiveProfileArg::LiveDebug => {}
-    }
-    if cmd.common.wake_preamble.is_none() {
-        cfg.wake_preamble = match cmd.profile {
-            LiveProfileArg::Standard => cfg.wake_preamble,
-            LiveProfileArg::LiveDebug | LiveProfileArg::Legacy4481483 => WakePreamble::Tone,
-        };
-    }
+    apply_profile_cfg(cfg, cmd.profile, cmd.common.wake_preamble.is_none());
 }
 
 pub(crate) fn rx_audio_opts(cmd: &RxCmd) -> AudioOpts {

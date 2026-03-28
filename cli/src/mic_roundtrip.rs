@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use acoustic_ofdm::{
     decode_single_packet_passband_with_sync, diagnose_passband_window_with_sync,
-    dump_passband_bins_with_sync, dump_passband_constellation, save_constellation_comparison_png,
-    save_spectrogram_png, save_spectrogram_png_with_options, save_wav_mono_i16, OfdmConfig,
-    PassbandBinDump,
+    dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
+    dump_passband_constellation, save_channel_compare_png, save_constellation_comparison_png, save_spectrogram_png,
+    save_spectrogram_png_with_options, save_wav_mono_i16, OfdmConfig, PassbandBinDump,
+    PassbandChannelCompareDump,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{traits::*, HeapRb};
@@ -40,6 +41,33 @@ fn save_bin_dump_csv(path: &Path, dump: &PassbandBinDump) -> Result<(), Box<dyn 
             row.post_eq.im,
             rr,
             ri
+        )?;
+    }
+    Ok(())
+}
+
+fn save_channel_compare_csv(
+    path: &Path,
+    dump: &PassbandChannelCompareDump,
+) -> Result<(), Box<dyn Error>> {
+    let mut file = std::fs::File::create(path)?;
+    writeln!(
+        file,
+        "data_symbol_idx,used_bin,role,actual_re,actual_im,est_train_re,est_train_im,est_pilot_re,est_pilot_im"
+    )?;
+    for row in &dump.rows {
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{},{},{}",
+            row.data_symbol_idx,
+            row.used_bin,
+            row.role,
+            row.actual_h.re,
+            row.actual_h.im,
+            row.estimated_h_train.re,
+            row.estimated_h_train.im,
+            row.estimated_h_pilot.re,
+            row.estimated_h_pilot.im
         )?;
     }
     Ok(())
@@ -235,13 +263,15 @@ pub(crate) fn cmd_mic_roundtrip(
             continue;
         }
         let window = &rx[start..start + win_len];
-        for sync_off in (sync_min..=sync_max).step_by(sync_step) {
+        let sync_candidates: Vec<usize> = if opts.oracle {
+            vec![0]
+        } else {
+            (sync_min..=sync_max).step_by(sync_step).collect()
+        };
+        for sync_off in sync_candidates {
+            let payload = decode_single_packet_passband_with_sync(window, &cfg_rx, sync_off as f32);
             let diag = diagnose_passband_window_with_sync(window, &cfg_rx, sync_off as f32);
-            let payload = if diag.decoded {
-                decode_single_packet_passband_with_sync(window, &cfg_rx, sync_off as f32)
-            } else {
-                None
-            };
+            let decoded = payload.is_some();
             let cand = Candidate {
                 burst_idx: i + 1,
                 nominal_start_sec,
@@ -251,9 +281,15 @@ pub(crate) fn cmd_mic_roundtrip(
                 train_evm: diag.train_recon_evm,
                 pilot_evm: diag.pilot_residual_evm,
                 data_evm: diag.post_eq_evm,
-                decoded: payload.is_some(),
+                decoded,
                 payload,
             };
+            let oracle_match = opts.oracle
+                && cand
+                    .payload
+                    .as_deref()
+                    .map(|p| p == ORACLE_PAYLOAD)
+                    .unwrap_or(false);
             let better = match &best_local {
                 Some(best) => {
                     cand.decoded.cmp(&best.decoded).is_gt()
@@ -266,8 +302,11 @@ pub(crate) fn cmd_mic_roundtrip(
                 }
                 None => true,
             };
-            if better {
-                best_local = Some(cand);
+            if better || oracle_match {
+                best_local = Some(cand.clone());
+            }
+            if oracle_match {
+                break;
             }
         }
         if let Some(best) = best_local {
@@ -295,7 +334,17 @@ pub(crate) fn cmd_mic_roundtrip(
                 None => true,
             };
             if better {
+                best_overall = Some(best.clone());
+            }
+            if opts.oracle
+                && best
+                    .payload
+                    .as_deref()
+                    .map(|p| p == ORACLE_PAYLOAD)
+                    .unwrap_or(false)
+            {
                 best_overall = Some(best);
+                break;
             }
         }
     }
@@ -309,7 +358,7 @@ pub(crate) fn cmd_mic_roundtrip(
     let window = &rx[start..start + win_len];
     if let Some(path) = &opts.dump_wav {
         if let Some(dir) = Path::new(path).parent() {
-            if let Some(cd) = dump_passband_constellation(window, &cfg_rx) {
+            if let Some(cd) = dump_passband_constellation(window, &cfg_rx, best.sync_off as f32) {
                 let png = dir.join("ofdm_constellation.png");
                 let pre_csv = dir.join("ofdm_constellation_pre_eq.csv");
                 let post_csv = dir.join("ofdm_constellation_post_eq.csv");
@@ -331,6 +380,18 @@ pub(crate) fn cmd_mic_roundtrip(
                 info_line!("Saved constellation PNG: {}", png.display());
                 info_line!("Saved constellation CSV: {}", pre_csv.display());
                 info_line!("Saved constellation CSV: {}", post_csv.display());
+            }
+            if opts.oracle {
+                if let Some(ch) =
+                    dump_passband_channel_compare_with_sync(payload, window, &cfg_rx, best.sync_off as f32)
+                {
+                    let csv_path = dir.join("ofdm_channel_compare.csv");
+                    let png_path = dir.join("ofdm_channel_compare.png");
+                    save_channel_compare_csv(&csv_path, &ch)?;
+                    save_channel_compare_png(&png_path, &ch)?;
+                    info_line!("Saved channel compare CSV: {}", csv_path.display());
+                    info_line!("Saved channel compare PNG: {}", png_path.display());
+                }
             }
         }
     }

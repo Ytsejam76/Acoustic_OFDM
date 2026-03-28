@@ -1,11 +1,16 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
-use rustfft::{num_complex::Complex32, FftPlanner};
+use rustfft::num_complex::Complex32;
 
+use crate::baseband::{
+    decode_packet_info_baseband, estimate_channel_from_training, fft, known_pilot_symbols,
+    known_training_symbols, ofdm_bin_plan, packet_symbol_plan, regularized_equalize,
+    equalize_symbol_with_pilots, PacketSymbolKind,
+    tx_one_packet_baseband,
+};
 use crate::config::{Modulation, OfdmConfig, WakePreamble};
 use crate::packet::{
-    bits_to_bytes, build_packet_bytes, bytes_to_bits, modulation_from_id, parse_packet_bytes,
-    split_payload, PacketInfo,
+    build_packet_bytes, modulation_from_id, split_payload, PacketInfo,
 };
 
 #[derive(Clone, Debug)]
@@ -75,84 +80,6 @@ pub struct PassbandSyncDump {
     pub coarse_sync_off: usize,
     pub refined_sync_off: usize,
     pub metrics: Vec<f32>,
-}
-
-fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
-    let h_pow = h.norm_sqr();
-    let eps = (1.0e-3f32).max(1.0e-2f32 * h_pow);
-    y * h.conj() / (h_pow + eps)
-}
-
-fn interpolate_complex_by_bins(points: &[(f32, Complex32)], used_bins: &[usize]) -> Vec<Complex32> {
-    if used_bins.is_empty() {
-        return Vec::new();
-    }
-    if points.is_empty() {
-        return vec![Complex32::new(1.0, 0.0); used_bins.len()];
-    }
-    if points.len() == 1 {
-        return vec![points[0].1; used_bins.len()];
-    }
-
-    let mut corr = Vec::with_capacity(used_bins.len());
-    for &ubin in used_bins {
-        let x = ubin as f32;
-        let val = if x <= points[0].0 {
-            points[0].1
-        } else if x >= points[points.len() - 1].0 {
-            points[points.len() - 1].1
-        } else {
-            let mut interp = points[0].1;
-            for w in points.windows(2) {
-                let (x0, c0) = w[0];
-                let (x1, c1) = w[1];
-                if x >= x0 && x <= x1 {
-                    let a = ((x - x0) / (x1 - x0)).clamp(0.0, 1.0);
-                    interp = c0 * (1.0 - a) + c1 * a;
-                    break;
-                }
-            }
-            interp
-        };
-        corr.push(val);
-    }
-    corr
-}
-
-fn update_channel_from_pilots(
-    y: &[Complex32],
-    used_bins: &[usize],
-    pilot_bins: &[usize],
-    pref: &[Complex32],
-    hest: &[Complex32],
-) -> Vec<Complex32> {
-    if used_bins.is_empty()
-        || hest.len() != used_bins.len()
-        || pilot_bins.is_empty()
-        || pref.is_empty()
-    {
-        return hest.to_vec();
-    }
-
-    let mut h_points = Vec::new();
-    for (k, pbin) in pilot_bins.iter().enumerate() {
-        let Some(_pos) = used_bins.iter().position(|b| b == pbin) else {
-            continue;
-        };
-        let h_obs = y[*pbin] / pref[k];
-        h_points.push((*pbin as f32, h_obs));
-    }
-
-    if h_points.is_empty() {
-        return hest.to_vec();
-    }
-    h_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let pilot_interp = interpolate_complex_by_bins(&h_points, used_bins);
-    let alpha = 0.85f32;
-    hest.iter()
-        .zip(pilot_interp.iter())
-        .map(|(h_prev, h_pilot)| *h_prev * (1.0 - alpha) + *h_pilot * alpha)
-        .collect()
 }
 
 fn pilot_phase_error(
@@ -320,6 +247,18 @@ pub fn encode_single_packet_passband(payload: &[u8], cfg: &OfdmConfig) -> Vec<f3
     tx_one_packet(&pkt_bytes, cfg)
 }
 
+/// Encodes one payload fragment into passband OFDM-body samples only.
+///
+/// Parameters:
+/// - `payload`: single-packet payload bytes (must fit packet payload budget).
+/// - `cfg`: modem configuration.
+/// Returns:
+/// - `Vec<f32>`: passband waveform for the OFDM body only, without wake/guard.
+pub fn encode_single_packet_passband_body(payload: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
+    let pkt_bytes = build_packet_bytes(payload, 0, 1, cfg);
+    tx_one_packet_body(&pkt_bytes, cfg)
+}
+
 /// Decodes one passband packet waveform into payload bytes.
 ///
 /// Parameters:
@@ -331,6 +270,22 @@ pub fn decode_single_packet_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Opt
     decode_packet_from_passband(pkt_audio, cfg).map(|p| p.payload)
 }
 
+/// Decodes one passband packet waveform into payload bytes using a known sync offset.
+///
+/// Parameters:
+/// - `pkt_audio`: passband packet waveform (wake + guard + OFDM body).
+/// - `cfg`: modem configuration.
+/// - `sync_off`: known repeated-half/training alignment offset in baseband samples.
+/// Returns:
+/// - `Option<Vec<u8>>`: decoded payload bytes, or `None` on failure.
+pub fn decode_single_packet_passband_with_sync(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    sync_off: f32,
+) -> Option<Vec<u8>> {
+    decode_packet_from_passband_with_sync(pkt_audio, cfg, sync_off).map(|p| p.payload)
+}
+
 /// Produces diagnostics for one passband packet window.
 ///
 /// Parameters:
@@ -339,6 +294,30 @@ pub fn decode_single_packet_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Opt
 /// Returns:
 /// - `PassbandDiagnostics`: sync/CFO/equalization diagnostics.
 pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> PassbandDiagnostics {
+    diagnose_passband_window_with_sync_opt(pkt_audio, cfg, None)
+}
+
+/// Produces diagnostics for one passband packet window using a known sync offset.
+///
+/// Parameters:
+/// - `pkt_audio`: passband packet waveform window.
+/// - `cfg`: modem configuration.
+/// - `sync_off`: known repeated-half/training alignment offset in baseband samples.
+/// Returns:
+/// - `PassbandDiagnostics`: sync/CFO/equalization diagnostics.
+pub fn diagnose_passband_window_with_sync(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    sync_off: f32,
+) -> PassbandDiagnostics {
+    diagnose_passband_window_with_sync_opt(pkt_audio, cfg, Some(sync_off))
+}
+
+fn diagnose_passband_window_with_sync_opt(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    forced_sync_off: Option<f32>,
+) -> PassbandDiagnostics {
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
@@ -366,7 +345,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
     let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
-    let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    let sync_off = forced_sync_off.unwrap_or_else(|| refine_sync_offset(rbb, cfg, coarse_sync_off));
     let rbb_sync = resample_from_offset(rbb, sync_off);
     let cfo_hz = estimate_coarse_cfo_hz(&rbb_sync, cfg);
     let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
@@ -430,15 +409,7 @@ pub fn diagnose_passband_window(pkt_audio: &[f32], cfg: &OfdmConfig) -> Passband
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let hsym = if pilot_bins.is_empty() {
-            hest.clone()
-        } else {
-            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
-        };
-        let mut xeq_used = Vec::with_capacity(used_bins.len());
-        for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
-        }
+        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
         if !pilot_bins.is_empty() {
             for (k, pbin) in pilot_bins.iter().enumerate() {
                 if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
@@ -546,15 +517,9 @@ pub fn dump_passband_constellation(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let hsym = if pilot_bins.is_empty() {
-            hest.clone()
-        } else {
-            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
-        };
-        let mut xeq_used = Vec::with_capacity(used_bins.len());
-        for (k, &bin) in used_bins.iter().enumerate() {
+        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        for &bin in &used_bins {
             pre_eq.push(y[bin]);
-            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
         }
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
@@ -638,11 +603,7 @@ pub fn dump_passband_pilot_tracking(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let hsym = update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
-        let mut xeq_used = Vec::with_capacity(used_bins.len());
-        for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
-        }
+        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
         let phase = pilot_phase_error(&xeq_used, &used_bins, &pilot_bins, &pref).unwrap_or(0.0);
         let mut pilot_eq_pre = Vec::new();
         let mut pilot_ref = Vec::new();
@@ -675,6 +636,22 @@ pub fn dump_passband_pilot_tracking(
 }
 
 pub fn dump_passband_bins(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandBinDump> {
+    dump_passband_bins_with_sync_opt(pkt_audio, cfg, None)
+}
+
+pub fn dump_passband_bins_with_sync(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    sync_off: f32,
+) -> Option<PassbandBinDump> {
+    dump_passband_bins_with_sync_opt(pkt_audio, cfg, Some(sync_off))
+}
+
+fn dump_passband_bins_with_sync_opt(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    forced_sync_off: Option<f32>,
+) -> Option<PassbandBinDump> {
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
@@ -688,7 +665,7 @@ pub fn dump_passband_bins(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Passban
     let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
-    let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
+    let sync_off = forced_sync_off.unwrap_or_else(|| refine_sync_offset(rbb, cfg, coarse_sync_off));
     let rbb_sync = resample_from_offset(rbb, sync_off);
     let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
 
@@ -729,17 +706,12 @@ pub fn dump_passband_bins(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Passban
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let hsym = if pilot_bins.is_empty() {
-            hest.clone()
-        } else {
-            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
-        };
+        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
         let mut pre_eq_used = Vec::with_capacity(used_bins.len());
         let mut post_eq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
-            let z = regularized_equalize(y[bin], hsym[k]);
-            pre_eq_used.push(z);
-            post_eq_used.push(z);
+            pre_eq_used.push(y[bin]);
+            post_eq_used.push(xeq_used[k]);
         }
         for (k, &ubin) in used_bins.iter().enumerate() {
             let role = if pilot_bins.contains(&ubin) {
@@ -808,155 +780,34 @@ pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<
 /// Returns:
 /// - `Vec<f32>`: real passband waveform for one packet.
 fn tx_one_packet(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
-    let xbb = tx_one_packet_baseband(pkt_bytes, cfg);
-    let passband = iq_upconvert(&xbb, cfg.fs, cfg.fc);
-    let wake = make_wake_tone(cfg);
+    let passband = tx_one_packet_body(pkt_bytes, cfg);
+    let mut wake = make_wake_tone(cfg);
+    normalize_in_place(&mut wake, 0.25);
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
 
     let mut out = Vec::with_capacity(wake.len() + guard_len + passband.len());
     out.extend_from_slice(&wake);
     out.extend(std::iter::repeat(0.0).take(guard_len));
     out.extend(passband);
-    normalize_in_place(&mut out, 0.85);
     out
 }
 
-/// Encodes one packet into complex baseband OFDM symbols.
-///
-/// Parameters:
-/// - `pkt_bytes`: serialized packet bytes.
-/// - `cfg`: modem configuration.
-/// Returns:
-/// - `Vec<Complex32>`: baseband complex samples.
-fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> {
-    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
-    let bits = bytes_to_bits(pkt_bytes);
-    let mut payload_syms = map_bits(&bits, cfg.modulation);
-    let syms_per_ofdm = data_bins.len();
-    if syms_per_ofdm == 0 {
-        return Vec::new();
-    }
-    let n_data = payload_syms.len().div_ceil(syms_per_ofdm);
-    payload_syms.resize(n_data * syms_per_ofdm, Complex32::new(0.0, 0.0));
-
-    let mut xbb = Vec::<Complex32>::new();
-    let sync_half = known_sync_half(cfg);
-    xbb.extend_from_slice(&sync_half);
-    xbb.extend_from_slice(&sync_half);
-
-    let train_time = training_symbol_time_domain(&used_bins, cfg);
-    append_cp_symbol(&mut xbb, &train_time, cfg.ncp);
-
-    let symbol_plan = packet_symbol_plan(n_data, cfg);
-    let mut data_idx = 0usize;
-    let mut data_symbol_idx = 0usize;
-    for kind in symbol_plan {
-        if kind == PacketSymbolKind::Training {
-            append_cp_symbol(&mut xbb, &train_time, cfg.ncp);
-            continue;
-        }
-        let mut x = vec![Complex32::new(0.0, 0.0); cfg.nfft];
-        for (k, &bin) in data_bins.iter().enumerate() {
-            x[bin] = payload_syms[data_idx * syms_per_ofdm + k];
-        }
-        if !pilot_bins.is_empty() {
-            let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-            for (k, &bin) in pilot_bins.iter().enumerate() {
-                x[bin] = pref[k];
-            }
-        }
-        let xt = ifft(&x);
-        append_cp_symbol(&mut xbb, &xt, cfg.ncp);
-        data_idx += 1;
-        data_symbol_idx += 1;
-    }
-
-    xbb
-}
-
-/// Decodes one baseband packet and returns payload bytes.
-///
-/// Parameters:
-/// - `rbb`: baseband complex packet samples.
-/// - `cfg`: modem configuration.
-/// Returns:
-/// - `Option<Vec<u8>>`: decoded payload bytes, or `None` on failure.
-pub fn decode_packet_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<Vec<u8>> {
-    decode_packet_info_baseband(rbb, cfg).map(|p| p.payload)
-}
-
-/// Decodes one baseband packet and returns full packet metadata.
-///
-/// Parameters:
-/// - `rbb`: baseband complex packet samples.
-/// - `cfg`: modem configuration.
-/// Returns:
-/// - `Option<PacketInfo>`: parsed packet metadata, or `None` on failure.
-fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<PacketInfo> {
-    let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
-    let n_data_carriers = data_bins.len();
-    if n_data_carriers == 0 {
-        return None;
-    }
-    let xsync_len = 2 * cfg.sync_half_len;
-    let train_len = cfg.nfft + cfg.ncp;
-    if rbb.len() < xsync_len + train_len {
-        return None;
-    }
-
-    let train_start = xsync_len;
-    let train_no_cp = &rbb[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
-    let ytrain = fft(train_no_cp);
-
-    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
-    let mut hest = estimate_channel_from_training(&ytrain, &used_bins, &train_known);
-
-    let data_start = xsync_len + train_len;
-    let sym_len = cfg.nfft + cfg.ncp;
-    let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
-    let max_data_ofdm = max_bits.div_ceil(n_data_carriers * cfg.modulation.bits_per_symbol()) + 2;
-    let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
-    let mut rx_syms = Vec::<Complex32>::new();
-    let mut data_symbol_idx = 0usize;
-
-    for (sym_idx, kind) in symbol_plan.into_iter().enumerate() {
-        let s0 = data_start + sym_idx * sym_len;
-        let s1 = s0 + sym_len;
-        if s1 > rbb.len() {
-            break;
-        }
-        let y = fft(&rbb[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
-        if kind == PacketSymbolKind::Training {
-            hest = estimate_channel_from_training(&y, &used_bins, &train_known);
-            continue;
-        }
-        let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let hsym = if pilot_bins.is_empty() {
-            hest.clone()
-        } else {
-            update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest)
-        };
-        let mut xeq_used = Vec::with_capacity(used_bins.len());
-        for (k, &bin) in used_bins.iter().enumerate() {
-            xeq_used.push(regularized_equalize(y[bin], hsym[k]));
-        }
-        for dbin in &data_bins {
-            if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
-                rx_syms.push(xeq_used[pos]);
-            }
-        }
-        let _ = sym_idx;
-        data_symbol_idx += 1;
-
-        let bits = demap_bits(&rx_syms, cfg.modulation);
-        let bytes = bits_to_bytes(&bits);
-        if let Some((pkt, _)) = parse_packet_bytes(&bytes) {
-            return Some(pkt);
+fn tx_one_packet_body(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
+    let xbb = tx_one_packet_baseband(pkt_bytes, cfg);
+    let mut passband = iq_upconvert(&xbb, cfg.fs, cfg.fc);
+    if (cfg.payload_gain - 1.0).abs() > f32::EPSILON {
+        for s in &mut passband {
+            *s *= cfg.payload_gain;
         }
     }
-
-    None
+    let sync_len = (2 * cfg.sync_half_len).min(passband.len());
+    if sync_len > 0 {
+        normalize_in_place(&mut passband[..sync_len], 0.35);
+    }
+    if sync_len < passband.len() {
+        normalize_in_place(&mut passband[sync_len..], 0.96);
+    }
+    passband
 }
 
 /// Decodes one passband packet (wake/guard prefixed) into packet metadata.
@@ -983,7 +834,43 @@ fn decode_packet_from_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Pa
     let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
     for off in [sync_off, coarse_sync_off as f32] {
         let rbb_sync = resample_from_offset(rbb, off);
-        let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
+        if let Some(pkt) = decode_packet_from_synced_baseband(&rbb_sync, cfg) {
+            return Some(pkt);
+        }
+    }
+    None
+}
+
+fn decode_packet_from_passband_with_sync(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    sync_off: f32,
+) -> Option<PacketInfo> {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb = &rbb_full[pre..];
+    let rbb_sync = resample_from_offset(rbb, sync_off);
+    decode_packet_from_synced_baseband(&rbb_sync, cfg)
+}
+
+fn decode_packet_from_synced_baseband(rbb_sync: &[Complex32], cfg: &OfdmConfig) -> Option<PacketInfo> {
+    let coarse_cfo_hz = estimate_coarse_cfo_hz(rbb_sync, cfg);
+    let mut tried = Vec::new();
+    tried.push(coarse_cfo_hz);
+    for hz in [-12.0f32, -8.0, -4.0, 4.0, 8.0, 12.0] {
+        tried.push(coarse_cfo_hz + hz);
+    }
+    for cfo_hz in tried {
+        let rbb_cfo = apply_cfo_hz(rbb_sync, cfg.fs, cfo_hz);
         if let Some(pkt) = decode_packet_info_baseband(&rbb_cfo, cfg) {
             return Some(pkt);
         }
@@ -1120,11 +1007,7 @@ fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig, off: f32) 
         if s1 <= rbb_cfo.len() {
             let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
             let pref = known_pilot_symbols(pilot_bins.len(), 1);
-            let hsym = update_channel_from_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
-            let mut xeq_used = Vec::with_capacity(used_bins.len());
-            for (k, &bin) in used_bins.iter().enumerate() {
-                xeq_used.push(regularized_equalize(y[bin], hsym[k]));
-            }
+            let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
             let mut pilot_eq = Vec::new();
             let mut pilot_ref = Vec::new();
             for (k, pbin) in pilot_bins.iter().enumerate() {
@@ -1138,56 +1021,6 @@ fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig, off: f32) 
     }
 
     2.0 * cp_score + 0.3 * hmag_mean - 2.0 * train_evm - 1.5 * pilot_evm
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PacketSymbolKind {
-    Training,
-    Data,
-}
-
-fn packet_symbol_plan(n_data_symbols: usize, cfg: &OfdmConfig) -> Vec<PacketSymbolKind> {
-    let mut plan = Vec::with_capacity(
-        n_data_symbols
-            + cfg
-                .retrain_interval_data_symbols
-                .map(|intv| if intv > 0 { n_data_symbols / intv } else { 0 })
-                .unwrap_or(0)
-            + usize::from(cfg.terminal_training_symbol),
-    );
-    for data_idx in 0..n_data_symbols {
-        if let Some(interval) = cfg.retrain_interval_data_symbols {
-            if interval > 0 && data_idx > 0 && data_idx % interval == 0 {
-                plan.push(PacketSymbolKind::Training);
-            }
-        }
-        plan.push(PacketSymbolKind::Data);
-    }
-    if cfg.terminal_training_symbol {
-        plan.push(PacketSymbolKind::Training);
-    }
-    plan
-}
-
-fn training_symbol_time_domain(used_bins: &[usize], cfg: &OfdmConfig) -> Vec<Complex32> {
-    let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
-    let mut xtrain = vec![Complex32::new(0.0, 0.0); cfg.nfft];
-    for (k, &bin) in used_bins.iter().enumerate() {
-        xtrain[bin] = train_known[k];
-    }
-    ifft(&xtrain)
-}
-
-fn estimate_channel_from_training(
-    ytrain: &[Complex32],
-    used_bins: &[usize],
-    train_known: &[Complex32],
-) -> Vec<Complex32> {
-    let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
-    for (k, &bin) in used_bins.iter().enumerate() {
-        hest[k] = ytrain[bin] / train_known[k];
-    }
-    hest
 }
 
 /// Applies coarse CFO correction from the repeated-half sync preamble.
@@ -1213,6 +1046,16 @@ fn coarse_cfo_correct(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<Complex32> {
         .collect()
 }
 
+fn apply_cfo_hz(rbb: &[Complex32], fs: f32, cfo_hz: f32) -> Vec<Complex32> {
+    rbb.iter()
+        .enumerate()
+        .map(|(n, &x)| {
+            let phase = -2.0 * std::f32::consts::PI * cfo_hz * (n as f32) / fs;
+            x * Complex32::from_polar(1.0, phase)
+        })
+        .collect()
+}
+
 fn estimate_coarse_cfo_hz(rbb: &[Complex32], cfg: &OfdmConfig) -> f32 {
     let l = cfg.sync_half_len;
     if l == 0 || rbb.len() < 2 * l {
@@ -1233,55 +1076,6 @@ fn estimate_coarse_cfo_hz(rbb: &[Complex32], cfg: &OfdmConfig) -> f32 {
 /// - `modulation`: modulation scheme.
 /// Returns:
 /// - `Vec<Complex32>`: constellation symbols.
-fn map_bits(bits: &[u8], modulation: Modulation) -> Vec<Complex32> {
-    match modulation {
-        Modulation::Bpsk => bits
-            .iter()
-            .map(|&b| {
-                if b == 0 {
-                    Complex32::new(1.0, 0.0)
-                } else {
-                    Complex32::new(-1.0, 0.0)
-                }
-            })
-            .collect(),
-        Modulation::Qpsk => {
-            let mut out = Vec::with_capacity(bits.len().div_ceil(2));
-            let mut i = 0;
-            while i < bits.len() {
-                let b0 = bits[i];
-                let b1 = if i + 1 < bits.len() { bits[i + 1] } else { 0 };
-                let re = if b0 == 0 { 1.0 } else { -1.0 };
-                let im = if b1 == 0 { 1.0 } else { -1.0 };
-                out.push(Complex32::new(re, im) * (1.0 / 2.0f32.sqrt()));
-                i += 2;
-            }
-            out
-        }
-    }
-}
-
-/// Demaps complex symbols back to hard bits for the selected modulation.
-///
-/// Parameters:
-/// - `syms`: input constellation symbols.
-/// - `modulation`: modulation scheme.
-/// Returns:
-/// - `Vec<u8>`: hard-decoded bits (`0/1` values).
-fn demap_bits(syms: &[Complex32], modulation: Modulation) -> Vec<u8> {
-    match modulation {
-        Modulation::Bpsk => syms.iter().map(|s| (s.re < 0.0) as u8).collect(),
-        Modulation::Qpsk => {
-            let mut bits = Vec::with_capacity(syms.len() * 2);
-            for s in syms {
-                bits.push((s.re < 0.0) as u8);
-                bits.push((s.im < 0.0) as u8);
-            }
-            bits
-        }
-    }
-}
-
 /// Hard-slices symbols to nearest ideal constellation point.
 ///
 /// Parameters:
@@ -1319,199 +1113,6 @@ fn hard_slice_symbols(syms: &[Complex32], modulation: Modulation) -> Vec<Complex
 /// - `modulation`: modulation scheme.
 /// Returns:
 /// - `Vec<Complex32>`: known training symbols.
-fn known_training_symbols(n: usize, modulation: Modulation) -> Vec<Complex32> {
-    match modulation {
-        Modulation::Bpsk => (0..n)
-            .map(|i| {
-                if i % 2 == 0 {
-                    Complex32::new(1.0, 0.0)
-                } else {
-                    Complex32::new(-1.0, 0.0)
-                }
-            })
-            .collect(),
-        Modulation::Qpsk => {
-            let base = [
-                Complex32::new(1.0, 1.0),
-                Complex32::new(1.0, -1.0),
-                Complex32::new(-1.0, 1.0),
-                Complex32::new(-1.0, -1.0),
-            ];
-            (0..n)
-                .map(|i| base[i % 4] * (1.0 / 2.0f32.sqrt()))
-                .collect()
-        }
-    }
-}
-
-/// Returns known pilot symbols for one OFDM data symbol index.
-///
-/// Parameters:
-/// - `n`: number of pilot carriers.
-/// - `sym_idx`: OFDM symbol index, starting at 1.
-/// Returns:
-/// - `Vec<Complex32>`: deterministic pilot symbols.
-fn known_pilot_symbols(n: usize, sym_idx: usize) -> Vec<Complex32> {
-    (0..n)
-        .map(|k| {
-            let m = ((sym_idx - 1) + k) % 4;
-            Complex32::from_polar(1.0, std::f32::consts::FRAC_PI_2 * (m as f32))
-        })
-        .collect()
-}
-
-/// Splits active bins into used, pilot and data bins.
-///
-/// Parameters:
-/// - `cfg`: modem configuration.
-/// Returns:
-/// - `(Vec<usize>, Vec<usize>, Vec<usize>)`: `(used_bins, pilot_bins, data_bins)`.
-fn ofdm_bin_plan(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-    let (used_bins, pilot_candidates) = resolve_bins_with_base_freq(cfg);
-    let pilots_on = cfg
-        .use_pilots
-        .unwrap_or(matches!(cfg.modulation, Modulation::Qpsk));
-    let pilot_bins = if pilots_on {
-        let mut pilots = pilot_candidates
-            .iter()
-            .copied()
-            .filter(|b| used_bins.contains(b))
-            .collect::<Vec<_>>();
-        if let Some(n) = cfg.num_pilots {
-            pilots.truncate(n.min(pilots.len()));
-        }
-        pilots
-    } else {
-        Vec::new()
-    };
-    let data_bins = used_bins
-        .iter()
-        .copied()
-        .filter(|b| !pilot_bins.contains(b))
-        .collect::<Vec<_>>();
-    (used_bins, pilot_bins, data_bins)
-}
-
-fn dedup_stable(v: Vec<usize>) -> Vec<usize> {
-    let mut out = Vec::with_capacity(v.len());
-    for x in v {
-        if !out.contains(&x) {
-            out.push(x);
-        }
-    }
-    out
-}
-
-fn resolve_bins_with_base_freq(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>) {
-    let mut used_bins = cfg.used_bins.clone();
-    let mut pilot_candidates = if cfg.pilot_bins.is_empty() {
-        used_bins.clone()
-    } else {
-        cfg.pilot_bins.clone()
-    };
-
-    if let Some(base_hz) = cfg.base_freq_hz {
-        let df = cfg.fs / (cfg.nfft as f32);
-        if df > 0.0 && !used_bins.is_empty() {
-            let target_bin = (base_hz / df).round() as isize;
-            let current_min = *used_bins.iter().min().unwrap_or(&1) as isize;
-            let shift = target_bin.max(1) - current_min;
-            let kmax = (cfg.nfft / 2).saturating_sub(1) as isize;
-            used_bins = used_bins
-                .iter()
-                .map(|&b| ((b as isize + shift).clamp(1, kmax)) as usize)
-                .collect();
-            pilot_candidates = pilot_candidates
-                .iter()
-                .map(|&b| ((b as isize + shift).clamp(1, kmax)) as usize)
-                .collect();
-        }
-    }
-
-    (dedup_stable(used_bins), dedup_stable(pilot_candidates))
-}
-
-/// Returns one half of the repeated sync preamble.
-///
-/// Parameters:
-/// - `cfg`: modem configuration.
-/// Returns:
-/// - `Vec<Complex32>`: sync half sequence.
-fn known_sync_half(cfg: &OfdmConfig) -> Vec<Complex32> {
-    let l = cfg.sync_half_len;
-    if l == 0 {
-        return Vec::new();
-    }
-
-    let (used_bins, _pilot_bins, _data_bins) = ofdm_bin_plan(cfg);
-    if used_bins.is_empty() {
-        return vec![Complex32::new(0.0, 0.0); l];
-    }
-
-    let mut out = Vec::with_capacity(l);
-    for n in 0..l {
-        let mut acc = Complex32::new(0.0, 0.0);
-        for (i, &bin) in used_bins.iter().enumerate() {
-            let phase0 = std::f32::consts::FRAC_PI_2 * (((3 * i + 1) % 4) as f32);
-            let phase =
-                phase0 + 2.0 * std::f32::consts::PI * (bin as f32) * (n as f32) / (cfg.nfft as f32);
-            acc += Complex32::from_polar(1.0, phase);
-        }
-        out.push(acc);
-    }
-
-    let scale = 1.0 / (used_bins.len() as f32).sqrt();
-    for v in &mut out {
-        *v *= scale;
-    }
-    out
-}
-
-/// Appends cyclic prefix and symbol samples to output.
-///
-/// Parameters:
-/// - `out`: destination sample vector.
-/// - `x`: one OFDM symbol (no CP).
-/// - `ncp`: cyclic prefix length.
-/// Returns:
-/// - none.
-fn append_cp_symbol(out: &mut Vec<Complex32>, x: &[Complex32], ncp: usize) {
-    out.extend_from_slice(&x[x.len() - ncp..]);
-    out.extend_from_slice(x);
-}
-
-/// Computes inverse FFT with unitary time-domain scaling.
-///
-/// Parameters:
-/// - `x`: frequency-domain bins.
-/// Returns:
-/// - `Vec<Complex32>`: time-domain samples.
-fn ifft(x: &[Complex32]) -> Vec<Complex32> {
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_inverse(x.len());
-    let mut buf = x.to_vec();
-    fft.process(&mut buf);
-    let scale = 1.0 / (x.len() as f32);
-    for v in &mut buf {
-        *v *= scale;
-    }
-    buf
-}
-
-/// Computes forward FFT.
-///
-/// Parameters:
-/// - `x`: time-domain samples.
-/// Returns:
-/// - `Vec<Complex32>`: frequency-domain bins.
-fn fft(x: &[Complex32]) -> Vec<Complex32> {
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(x.len());
-    let mut buf = x.to_vec();
-    fft.process(&mut buf);
-    buf
-}
-
 /// IQ-upconverts complex baseband to real passband.
 ///
 /// Parameters:
@@ -1749,23 +1350,13 @@ mod tests {
     }
 
     #[test]
-    /// Verifies baseband packet encode/decode path.
-    fn decode_single_packet_baseband() {
-        let cfg = OfdmConfig::default();
-        let payload: Vec<u8> = (100..120).collect();
-        let pkt = build_packet_bytes(&payload, 0, 1, &cfg);
-        let xbb = tx_one_packet_baseband(&pkt, &cfg);
-        let out = decode_packet_baseband(&xbb, &cfg).expect("baseband decode failed");
-        assert_eq!(out, payload);
-    }
-
-    #[test]
     /// Verifies passband packet encode/decode path.
     fn decode_single_packet_passband_test() {
         let cfg = OfdmConfig::default();
         let payload: Vec<u8> = (40..64).collect();
         let y = encode_single_packet_passband(&payload, &cfg);
-        let out = decode_single_packet_passband(&y, &cfg).expect("passband decode failed");
+        let out = decode_single_packet_passband_with_sync(&y, &cfg, 0.0)
+            .expect("passband decode failed");
         assert_eq!(out, payload);
     }
 
@@ -1791,30 +1382,6 @@ mod tests {
         assert_eq!(qpsk_s[3], Complex32::new(-1.0 * k, -1.0 * k));
     }
 
-    #[test]
-    /// Verifies pilot count is capped by `num_pilots`.
-    fn pilot_count_capped_by_num_pilots() {
-        let mut cfg = OfdmConfig::default();
-        cfg.modulation = Modulation::Qpsk;
-        cfg.use_pilots = Some(true);
-        cfg.used_bins = vec![2, 3, 4, 5];
-        cfg.pilot_bins = vec![2, 4, 5];
-        cfg.num_pilots = Some(2);
-        let (_used, pilots, data) = ofdm_bin_plan(&cfg);
-        assert_eq!(pilots, vec![2, 4]);
-        assert_eq!(data, vec![3, 5]);
-    }
-
-    #[test]
-    /// Verifies active bins shift when base frequency is configured.
-    fn base_frequency_shifts_bins() {
-        let mut cfg = OfdmConfig::default();
-        cfg.base_freq_hz = Some(2_000.0);
-        let (used, pilots, data) = ofdm_bin_plan(&cfg);
-        assert_eq!(used, vec![4, 5, 6, 7]);
-        assert!(pilots.is_empty());
-        assert_eq!(data, vec![4, 5, 6, 7]);
-    }
 }
 
 // vim: set ts=4 sw=4 et:

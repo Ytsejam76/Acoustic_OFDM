@@ -14,11 +14,14 @@ At the end of the day, this may or may not end up working well as a practical mo
 
 ## Status
 
-- Octave: main reference implementation, including channel simulation, synchronization experiments, BER/PER sweeps, constellation/time-domain plots, and echo models.
-- Rust (`acoustic_ofdm`): packet build/parse, passband modulation/demodulation, BPSK/QPSK, configurable base frequency, pilots, equalization, sync diagnostics, and oracle round-trip tests are in place.
-- Rust CLI (`acoustic_ofdm_cli`): `clap`-based CLI with WAV encode/decode, roundtrip, codec-loop channel simulation, and live `tx`/`rx` commands is available.
-- Rust live-audio debugging support includes WAV capture dumps, spectrogram export, sync-metric dumps, and constellation dumps.
-- Rust live non-oracle over-the-air synchronization is still experimental and not yet reliable enough to describe as working.
+- Octave: main reference implementation for simulations, sweeps, and plots.
+- Rust library (`acoustic_ofdm`): baseband and passband single-packet OFDM path, packet build/parse, BPSK/QPSK, pilots, equalization, diagnostics, and oracle round-trip tests are in place.
+- Rust CLI (`acoustic_ofdm_cli`): WAV encode/decode, spectrogram export, live `tx`, capture-only `rx`, and coordinated `mic-roundtrip`.
+- Current Rust live workflow is decode-first:
+  - known scheduled burst times
+  - local `sync_off` sweep only
+  - no wake/coarse-search focus at this stage
+- Current audible setup is working in practice for oracle tests with `mic-roundtrip`; the synchronized TX/RX path decodes repeated bursts and saves debug artifacts.
 
 ## Links
 
@@ -34,7 +37,7 @@ At the end of the day, this may or may not end up working well as a practical mo
 
 ## Quick start
 
-### CLI WAV test app
+### WAV commands
 
 Encode payload to WAV:
 
@@ -78,41 +81,77 @@ Roundtrip with custom OFDM base subcarrier frequency:
 cargo run -p acoustic_ofdm_cli -- roundtrip --base-freq-hz 2000 /tmp/ofdm.wav "hello-ofdm"
 ```
 
-Encode/decode self-test loop with randomized channel realizations:
+Generate OFDM body only (no calibration, no wake, no guard):
 
 ```bash
-cargo run -p acoustic_ofdm_cli -- codec-loop --iterations 100 --snr-db 26 --echo 0.8:0.15 "hello-ofdm"
+cargo run -p acoustic_ofdm_cli -- encode-body /tmp/ofdm_body.wav "hello-ofdm"
 ```
 
-Add random echoes per iteration:
+Generate a spectrogram from a WAV:
 
 ```bash
-cargo run -p acoustic_ofdm_cli -- codec-loop --iterations 50 \
-  --snr-db 28 --rand-echo-count 1 --rand-echo-max-ms 1.5 \
-  --rand-echo-gain-min 0.03 --rand-echo-gain-max 0.10 \
-  "hello-ofdm"
+cargo run -p acoustic_ofdm_cli -- spectrogram \
+  --in-wav /tmp/ofdm.wav \
+  --out-png /tmp/ofdm.png
 ```
 
-Over-the-air modem test (`tx` sends encoded packet, `rx` listens and decodes):
+Decode a known window from a WAV:
 
 ```bash
-# terminal 1
-cargo run -p acoustic_ofdm_cli -- rx --duration-sec 6 --wake-preamble pn \
-  --dump-wav /tmp/rx_capture.wav --verbose
-
-# terminal 2
-cargo run -p acoustic_ofdm_cli -- tx --spk-gain 0.8 --repeats 2 --pre-delay-sec 0.5 --wake-preamble pn "hello-ofdm"
+cargo run -p acoustic_ofdm_cli -- decode \
+  --start-sec 1.20 \
+  --window-sec 1.40 \
+  --sync-off 0 \
+  /tmp/rx_capture.wav
 ```
 
-Note: this binary uses `cpal`, which on Linux typically runs through ALSA
-or JACK backends and works well with PipeWire setups that provide ALSA/JACK
-compatibility layers.
+### Live scripts
 
-For Rust live-audio tests, wake preamble modes are selectable with
-`--wake-preamble gold|pn|chirp|tone`. The default is `gold`.
-Use `--dump-wav PATH` on `rx` to save the captured audio for offline inspection.
-Use `--oracle` on both `tx` and `rx` to send and verify a fixed known payload
-while debugging live synchronization.
+The repository root contains convenience scripts with current defaults.
+
+Transmit repeated BPSK bursts:
+
+```bash
+bash tx_simple.sh
+```
+
+Transmit repeated QPSK bursts:
+
+```bash
+bash tx_qpsk.sh
+```
+
+Generate the OFDM body only (first transmission, no wake/calibration):
+
+```bash
+bash tx_symbols_only.sh
+```
+
+Coordinated speaker/mic roundtrip, BPSK:
+
+```bash
+bash rx_decode_simple.sh
+```
+
+Coordinated speaker/mic roundtrip, QPSK:
+
+```bash
+bash rx_decode_qpsk.sh
+```
+
+Artifacts are written under `output/`, including:
+
+- `tx_packet.wav`
+- `tx_symbols_only.wav`
+- `tx_roundtrip.wav`
+- `rx_capture.wav`
+- `rx_spectrogram.png`
+- `ofdm_constellation.png`
+- `ofdm_constellation_pre_eq.csv`
+- `ofdm_constellation_post_eq.csv`
+
+For the current decode-first phase, `mic-roundtrip` is the main live test path.
+It uses known scheduled burst times and only searches a small `sync_off` range.
 
 ### Octave
 
@@ -190,15 +229,23 @@ Generated files are written to `images/`:
   - `time_domain_compare_qpsk.png`
   - Each image contains one subplot per channel model and overlays TX/RX with legend.
 
-## Current modem design (short-burst)
+## Current modem design
 
-- packetized bursts (not continuous streaming)
-- wake preamble for coarse packet detection
-- repeated-half sync symbol for timing/coarse CFO
+- packetized bursts, not continuous streaming
+- repeated-half sync preamble
 - training OFDM symbol for channel estimation
+- pilot-assisted equalization
 - BPSK and QPSK
-- passband around ~17 kHz in current setup
-- tunable OFDM base subcarrier frequency (`base_freq_hz`) in both Octave and Rust config
+- current Rust live defaults are fully audible
+- configurable OFDM base subcarrier placement via `base_freq_hz`
+
+Current live bring-up intentionally avoids global wake/search complexity.
+The priority is:
+
+1. produce a clearly visible/audible transmitted waveform
+2. capture it through the speaker/mic path
+3. decode it with known burst timing
+4. only later reintroduce coarse sync / wake search as separate modem concerns
 
 ## Historical note
 

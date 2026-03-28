@@ -21,43 +21,33 @@ pub(crate) fn f32_to_u16(x: f32) -> u16 {
     ((x.clamp(-1.0, 1.0) * 32767.0) + 32768.0).round() as u16
 }
 
-fn sinc(x: f32) -> f32 {
-    if x.abs() < 1e-8 {
-        1.0
-    } else {
-        (std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x)
+pub(crate) fn signal_diag(x: &[f32]) -> (f32, f32, usize) {
+    if x.is_empty() {
+        return (0.0, 0.0, 0);
     }
-}
-
-pub(crate) fn fir_bandpass(len: usize, f_lo_hz: f32, f_hi_hz: f32, fs: f32) -> Vec<f32> {
-    let m = (len - 1) as f32 / 2.0;
-    let mut h = vec![0.0f32; len];
-    let lo = f_lo_hz / fs;
-    let hi = f_hi_hz / fs;
-    for (n, hn) in h.iter_mut().enumerate() {
-        let k = n as f32 - m;
-        let ideal = 2.0 * hi * sinc(2.0 * hi * k) - 2.0 * lo * sinc(2.0 * lo * k);
-        let win = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * n as f32 / (len as f32 - 1.0)).cos();
-        *hn = ideal * win;
-    }
-    let sum = h.iter().sum::<f32>().abs().max(1e-12);
-    for hn in &mut h {
-        *hn /= sum;
-    }
-    h
-}
-
-pub(crate) fn fir_filter(x: &[f32], h: &[f32]) -> Vec<f32> {
-    let mut y = vec![0.0f32; x.len()];
-    for n in 0..x.len() {
-        let mut acc = 0.0f32;
-        let kmax = h.len().min(n + 1);
-        for k in 0..kmax {
-            acc += h[k] * x[n - k];
+    let mut peak = 0.0f32;
+    let mut pwr = 0.0f32;
+    let mut first = x.len();
+    for (i, &s) in x.iter().enumerate() {
+        let a = s.abs();
+        if a > peak {
+            peak = a;
         }
-        y[n] = acc;
+        if first == x.len() && a > 0.02 {
+            first = i;
+        }
+        pwr += s * s;
     }
-    y
+    let rms = (pwr / (x.len() as f32)).sqrt();
+    (rms, peak, first)
+}
+
+pub(crate) fn clipping_diag(x: &[f32]) -> (usize, f32) {
+    if x.is_empty() {
+        return (0, 0.0);
+    }
+    let clipped = x.iter().filter(|&&s| s.abs() >= 0.995).count();
+    (clipped, (clipped as f32) / (x.len() as f32))
 }
 
 pub(crate) fn build_input_stream(

@@ -9,7 +9,7 @@ pub mod packet;
 pub mod spectrogram;
 pub mod wav_io;
 
-pub use config::{EqualizerMode, Modulation, OfdmConfig, WakePreamble};
+pub use config::{EqualizerMode, Modulation, OfdmConfig, PassbandMode, WakePreamble};
 pub use constellation::{save_channel_compare_png, save_constellation_comparison_png};
 pub use baseband::{
     decode_packet_baseband, encode_single_packet_baseband, expected_single_packet_data_symbols,

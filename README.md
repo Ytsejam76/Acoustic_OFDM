@@ -17,6 +17,9 @@ At the end of the day, this may or may not end up working well as a practical mo
 - Octave: main reference implementation for simulations, sweeps, and plots.
 - Rust library (`acoustic_ofdm`): baseband and passband single-packet OFDM path, packet build/parse, BPSK/QPSK, pilots, equalization, diagnostics, and oracle round-trip tests are in place.
 - Rust CLI (`acoustic_ofdm_cli`): WAV encode/decode, spectrogram export, live `tx`, capture-only `rx`, and coordinated `mic-roundtrip`.
+- Passband path can now be selected explicitly:
+  - `legacy`: current single-rate passband path
+  - `iq`: separate baseband/audio-rate path with resampling
 - Current Rust live workflow is decode-first:
   - known scheduled burst times
   - local `sync_off` sweep only
@@ -105,14 +108,34 @@ cargo run -p acoustic_ofdm_cli -- decode \
   /tmp/rx_capture.wav
 ```
 
+Use IQ mode explicitly:
+
+```bash
+cargo run -p acoustic_ofdm_cli -- encode \
+  --passband-mode iq \
+  --fs-baseband 22050 \
+  /tmp/ofdm_iq.wav \
+  "hello-ofdm"
+```
+
 ### Live scripts
 
 The repository root contains convenience scripts with current defaults.
+
+There are two families:
+- `legacy`: current single-rate working baseline
+- `iq`: alternate IQ path with `fs_baseband = 22050`
 
 Transmit repeated BPSK bursts:
 
 ```bash
 bash tx_simple.sh
+```
+
+Transmit repeated BPSK bursts with IQ mode:
+
+```bash
+bash tx_iq.sh
 ```
 
 Transmit repeated QPSK bursts:
@@ -133,6 +156,12 @@ Coordinated speaker/mic roundtrip, BPSK:
 bash rx_decode_simple.sh
 ```
 
+Coordinated speaker/mic roundtrip, BPSK, IQ mode:
+
+```bash
+bash rx_decode_iq.sh
+```
+
 Coordinated speaker/mic roundtrip, QPSK:
 
 ```bash
@@ -149,9 +178,77 @@ Artifacts are written under `output/`, including:
 - `ofdm_constellation.png`
 - `ofdm_constellation_pre_eq.csv`
 - `ofdm_constellation_post_eq.csv`
+- `ofdm_channel_compare.csv`
+- `ofdm_channel_compare.png`
 
 For the current decode-first phase, `mic-roundtrip` is the main live test path.
 It uses known scheduled burst times and only searches a small `sync_off` range.
+
+### Script usage
+
+The scripts take no positional parameters. They are meant to be stable presets.
+
+- `tx_simple.sh`
+  - legacy passband mode
+  - BPSK
+  - 8 repeats
+  - writes `output/tx.wav`
+
+- `rx_decode_simple.sh`
+  - legacy passband mode
+  - BPSK
+  - one coordinated speaker/mic transmission
+  - writes:
+    - `output/tx_packet.wav`
+    - `output/tx_symbols_only.wav`
+    - `output/tx_roundtrip.wav`
+    - `output/rx_capture.wav`
+    - `output/rx_spectrogram.png`
+    - constellation/channel-comparison artifacts
+  - log file:
+    - `acoustic_ofdm_mic_roundtrip.log`
+
+- `tx_qpsk.sh`
+  - legacy passband mode
+  - QPSK
+  - writes `output/tx_qpsk.wav`
+
+- `rx_decode_qpsk.sh`
+  - legacy passband mode
+  - QPSK
+  - writes QPSK-specific WAVs and spectrogram
+  - log file:
+    - `acoustic_ofdm_mic_roundtrip_qpsk.log`
+
+- `tx_symbols_only.sh`
+  - writes only the OFDM body for one packet
+  - no wake, no guard, no calibration
+  - useful for listening to the payload itself
+
+- `tx_iq.sh`
+  - IQ passband mode
+  - `fs_baseband = 22050`
+  - BPSK
+  - writes `output/tx_iq.wav`
+
+- `rx_decode_iq.sh`
+  - IQ passband mode
+  - `fs_baseband = 22050`
+  - BPSK
+  - writes IQ-specific TX/RX WAVs and spectrogram
+  - log file:
+    - `acoustic_ofdm_mic_roundtrip_iq.log`
+
+Recommended workflow:
+
+1. Start with the working baseline:
+   - `bash rx_decode_simple.sh`
+2. Compare against QPSK if needed:
+   - `bash rx_decode_qpsk.sh`
+3. Compare the alternate passband implementation:
+   - `bash rx_decode_iq.sh`
+
+That keeps the baseline and the experimental IQ path separate.
 
 ### Octave
 
@@ -236,6 +333,9 @@ Generated files are written to `images/`:
 - training OFDM symbol for channel estimation
 - pilot-assisted equalization
 - BPSK and QPSK
+- selectable passband path:
+  - `legacy`: single-rate
+  - `iq`: baseband/audio split with resampling
 - current Rust live defaults are fully audible
 - configurable OFDM base subcarrier placement via `base_freq_hz`
 

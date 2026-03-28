@@ -12,6 +12,12 @@ pub enum EqualizerMode {
     PilotOnly,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassbandMode {
+    Legacy,
+    Iq,
+}
+
 impl Modulation {
     /// Returns the number of bits carried by one constellation symbol.
     ///
@@ -84,6 +90,7 @@ impl WakePreamble {
 #[derive(Clone, Debug)]
 pub struct OfdmConfig {
     pub fs: f32,
+    pub fs_baseband: f32,
     pub fc: f32,
     pub payload_gain: f32,
     pub nfft: usize,
@@ -97,6 +104,7 @@ pub struct OfdmConfig {
     pub terminal_training_symbol: bool,
     pub modulation: Modulation,
     pub equalizer_mode: EqualizerMode,
+    pub passband_mode: PassbandMode,
     pub wake_ms: f32,
     pub wake_freq: f32,
     pub wake_guard_ms: f32,
@@ -118,6 +126,7 @@ impl Default for OfdmConfig {
     fn default() -> Self {
         Self {
             fs: 44_100.0,
+            fs_baseband: 44_100.0,
             fc: 7_500.0,
             payload_gain: 2.0,
             nfft: 2048,
@@ -131,6 +140,7 @@ impl Default for OfdmConfig {
             terminal_training_symbol: false,
             modulation: Modulation::Bpsk,
             equalizer_mode: EqualizerMode::TrainingPilot,
+            passband_mode: PassbandMode::Legacy,
             wake_ms: 80.0,
             wake_freq: 5_500.0,
             wake_guard_ms: 20.0,

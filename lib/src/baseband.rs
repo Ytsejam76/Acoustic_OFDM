@@ -2,7 +2,7 @@
 
 use rustfft::{num_complex::Complex32, FftPlanner};
 
-use crate::config::{EqualizerMode, Modulation, OfdmConfig};
+use crate::config::{EqualizerMode, Modulation, OfdmConfig, PassbandMode};
 use crate::packet::{
     bits_to_bytes, build_packet_bytes, bytes_to_bits, parse_packet_bytes, PacketInfo,
 };
@@ -431,7 +431,11 @@ fn resolve_bins_with_base_freq(cfg: &OfdmConfig) -> (Vec<usize>, Vec<usize>) {
     };
 
     if let Some(base_hz) = cfg.base_freq_hz {
-        let df = cfg.fs / (cfg.nfft as f32);
+        let numerology_fs = match cfg.passband_mode {
+            PassbandMode::Legacy => cfg.fs,
+            PassbandMode::Iq => cfg.fs_baseband,
+        };
+        let df = numerology_fs / (cfg.nfft as f32);
         if df > 0.0 && !used_bins.is_empty() {
             let target_bin = (base_hz / df).round() as isize;
             let current_min = *used_bins.iter().min().unwrap_or(&1) as isize;

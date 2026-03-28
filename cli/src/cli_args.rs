@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::io::Read;
 
-use acoustic_ofdm::{EqualizerMode, Modulation, OfdmConfig, SpectrogramOptions, SpectrogramWindow, WakePreamble};
+use acoustic_ofdm::{EqualizerMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions, SpectrogramWindow, WakePreamble};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::live_profile::LiveProfileArg;
@@ -27,6 +27,12 @@ pub(crate) enum ModulationArg {
 pub(crate) enum EqualizerModeArg {
     TrainingPilot,
     PilotOnly,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum PassbandModeArg {
+    Legacy,
+    Iq,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -77,14 +83,27 @@ impl From<EqualizerModeArg> for EqualizerMode {
     }
 }
 
+impl From<PassbandModeArg> for PassbandMode {
+    fn from(value: PassbandModeArg) -> Self {
+        match value {
+            PassbandModeArg::Legacy => PassbandMode::Legacy,
+            PassbandModeArg::Iq => PassbandMode::Iq,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args, Default)]
 pub(crate) struct CommonCfgArgs {
     #[arg(short = 'b', long)]
     pub(crate) base_freq_hz: Option<f32>,
+    #[arg(long)]
+    pub(crate) fs_baseband: Option<f32>,
     #[arg(short = 'm', long, value_enum)]
     pub(crate) modulation: Option<ModulationArg>,
     #[arg(long, value_enum)]
     pub(crate) equalizer_mode: Option<EqualizerModeArg>,
+    #[arg(long, value_enum)]
+    pub(crate) passband_mode: Option<PassbandModeArg>,
     #[arg(short = 'w', long, value_enum)]
     pub(crate) wake_preamble: Option<WakePreambleArg>,
 }
@@ -342,11 +361,20 @@ pub(crate) fn apply_common_cfg(
         }
         cfg.base_freq_hz = Some(hz);
     }
+    if let Some(fs_baseband) = common.fs_baseband {
+        if !fs_baseband.is_finite() || fs_baseband <= 0.0 {
+            return Err("baseband sample rate must be a positive finite number".into());
+        }
+        cfg.fs_baseband = fs_baseband;
+    }
     if let Some(m) = common.modulation {
         cfg.modulation = m.into();
     }
     if let Some(m) = common.equalizer_mode {
         cfg.equalizer_mode = m.into();
+    }
+    if let Some(m) = common.passband_mode {
+        cfg.passband_mode = m.into();
     }
     if let Some(w) = common.wake_preamble {
         cfg.wake_preamble = w.into();

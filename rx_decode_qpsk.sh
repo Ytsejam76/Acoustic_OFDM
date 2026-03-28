@@ -19,6 +19,8 @@ rm -f \
   "$OUT_DIR/ofdm_constellation.png" \
   "$OUT_DIR/ofdm_constellation_pre_eq.csv" \
   "$OUT_DIR/ofdm_constellation_post_eq.csv" \
+  "$OUT_DIR/ofdm_channel_compare.csv" \
+  "$OUT_DIR/ofdm_channel_compare.png" \
   "$ROOT/$LOG"
 
 cargo run -p acoustic_ofdm_cli -- \

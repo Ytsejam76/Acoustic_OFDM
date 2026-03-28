@@ -8,7 +8,7 @@ use crate::baseband::{
     known_training_symbols, ofdm_bin_plan, packet_symbol_plan, regularized_equalize, PacketSymbolKind,
     tx_one_packet_baseband,
 };
-use crate::config::{Modulation, OfdmConfig, WakePreamble};
+use crate::config::{Modulation, OfdmConfig, PassbandMode, WakePreamble};
 use crate::packet::{
     build_packet_bytes, modulation_from_id, split_payload, PacketInfo,
 };
@@ -130,6 +130,29 @@ fn sample_complex_linear(x: &[Complex32], pos: f32) -> Complex32 {
     let i1 = (i0 + 1).min(x.len() - 1);
     let a = pos - (i0 as f32);
     x[i0] * (1.0 - a) + x[i1] * a
+}
+
+fn active_baseband_fs(cfg: &OfdmConfig) -> f32 {
+    match cfg.passband_mode {
+        PassbandMode::Legacy => cfg.fs,
+        PassbandMode::Iq => cfg.fs_baseband,
+    }
+}
+
+fn resample_complex_linear_rate(x: &[Complex32], fs_in: f32, fs_out: f32) -> Vec<Complex32> {
+    if x.is_empty() || fs_in <= 0.0 || fs_out <= 0.0 {
+        return Vec::new();
+    }
+    if (fs_in - fs_out).abs() <= 1.0e-6 {
+        return x.to_vec();
+    }
+    let out_len = ((x.len() as f32) * fs_out / fs_in).round().max(1.0) as usize;
+    let step = fs_in / fs_out;
+    let mut out = Vec::with_capacity(out_len);
+    for n in 0..out_len {
+        out.push(sample_complex_linear(x, n as f32 * step));
+    }
+    out
 }
 
 fn resample_from_offset(x: &[Complex32], start: f32) -> Vec<Complex32> {
@@ -357,7 +380,7 @@ fn diagnose_passband_window_with_sync_opt(
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = forced_sync_off.unwrap_or_else(|| refine_sync_offset(rbb, cfg, coarse_sync_off));
@@ -488,7 +511,7 @@ pub fn dump_passband_constellation(
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let rbb_sync = resample_from_offset(rbb, sync_off);
     let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
@@ -558,7 +581,7 @@ pub fn dump_passband_pilot_tracking(
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
@@ -674,7 +697,7 @@ fn dump_passband_bins_with_sync_opt(
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = forced_sync_off.unwrap_or_else(|| refine_sync_offset(rbb, cfg, coarse_sync_off));
@@ -772,7 +795,7 @@ pub fn dump_passband_channel_compare_with_sync(
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let rbb_sync = resample_from_offset(rbb, sync_off);
     let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
@@ -903,7 +926,7 @@ pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let metrics = repeated_half_sync_metrics(rbb, cfg);
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
@@ -937,7 +960,7 @@ fn tx_one_packet(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
 
 fn tx_one_packet_body(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
     let xbb = tx_one_packet_baseband(pkt_bytes, cfg);
-    let mut passband = iq_upconvert(&xbb, cfg.fs, cfg.fc);
+    let mut passband = upconvert_passband(&xbb, cfg);
     if (cfg.payload_gain - 1.0).abs() > f32::EPSILON {
         for s in &mut passband {
             *s *= cfg.payload_gain;
@@ -951,6 +974,31 @@ fn tx_one_packet_body(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<f32> {
         normalize_in_place(&mut passband[sync_len..], 0.96);
     }
     passband
+}
+
+fn upconvert_passband(xbb: &[Complex32], cfg: &OfdmConfig) -> Vec<f32> {
+    match cfg.passband_mode {
+        PassbandMode::Legacy => iq_upconvert(xbb, cfg.fs, cfg.fc),
+        PassbandMode::Iq => {
+            let xbb_audio = resample_complex_linear_rate(xbb, cfg.fs_baseband, cfg.fs);
+            iq_upconvert(&xbb_audio, cfg.fs, cfg.fc)
+        }
+    }
+}
+
+fn passband_lpf_cutoff_hz(cfg: &OfdmConfig) -> f32 {
+    let (used_bins, _, _) = ofdm_bin_plan(cfg);
+    let max_bin = used_bins.iter().copied().max().unwrap_or(1) as f32;
+    let bw = ((max_bin + 2.0) * active_baseband_fs(cfg) / cfg.nfft as f32).max(500.0);
+    bw.min(0.45 * cfg.fs).min(0.45 * active_baseband_fs(cfg))
+}
+
+fn downconvert_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Vec<Complex32> {
+    let mixed = iq_downconvert(pkt_audio, cfg.fs, cfg.fc, passband_lpf_cutoff_hz(cfg));
+    match cfg.passband_mode {
+        PassbandMode::Legacy => mixed,
+        PassbandMode::Iq => resample_complex_linear_rate(&mixed, cfg.fs, cfg.fs_baseband),
+    }
 }
 
 /// Decodes one passband packet (wake/guard prefixed) into packet metadata.
@@ -971,7 +1019,7 @@ fn decode_packet_from_passband(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<Pa
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
     let sync_off = refine_sync_offset(rbb, cfg, coarse_sync_off);
@@ -999,7 +1047,7 @@ fn decode_packet_from_passband_with_sync(
     let pre = 128usize.min(passband.len());
     let mut chunk = vec![0.0f32; pre];
     chunk.extend_from_slice(passband);
-    let rbb_full = iq_downconvert(&chunk, cfg.fs, cfg.fc);
+    let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let rbb_sync = resample_from_offset(rbb, sync_off);
     decode_packet_from_synced_baseband(&rbb_sync, cfg)
@@ -1013,7 +1061,7 @@ fn decode_packet_from_synced_baseband(rbb_sync: &[Complex32], cfg: &OfdmConfig) 
         tried.push(coarse_cfo_hz + hz);
     }
     for cfo_hz in tried {
-        let rbb_cfo = apply_cfo_hz(rbb_sync, cfg.fs, cfo_hz);
+        let rbb_cfo = apply_cfo_hz(rbb_sync, active_baseband_fs(cfg), cfo_hz);
         if let Some(pkt) = decode_packet_info_baseband(&rbb_cfo, cfg) {
             return Some(pkt);
         }
@@ -1043,7 +1091,8 @@ fn repeated_half_sync_metrics(rbb: &[Complex32], cfg: &OfdmConfig) -> Vec<f32> {
     if l == 0 || rbb.len() < 2 * l + 2 {
         return Vec::new();
     }
-    let max_search = ((0.12 * cfg.fs).round() as usize).min(rbb.len().saturating_sub(2 * l + 1));
+    let max_search = ((0.12 * active_baseband_fs(cfg)).round() as usize)
+        .min(rbb.len().saturating_sub(2 * l + 1));
     if max_search == 0 {
         return Vec::new();
     }
@@ -1209,7 +1258,7 @@ fn estimate_coarse_cfo_hz(rbb: &[Complex32], cfg: &OfdmConfig) -> f32 {
         p += rbb[n].conj() * rbb[n + l];
     }
     let ph_inc = p.arg() / (l as f32);
-    ph_inc * cfg.fs / (2.0 * std::f32::consts::PI)
+    ph_inc * active_baseband_fs(cfg) / (2.0 * std::f32::consts::PI)
 }
 
 /// Maps bits to complex symbols for the selected modulation.
@@ -1280,9 +1329,10 @@ fn iq_upconvert(xbb: &[Complex32], fs: f32, fc: f32) -> Vec<f32> {
 /// - `y`: real passband samples.
 /// - `fs`: sample rate (Hz).
 /// - `fc`: carrier frequency (Hz).
+/// - `cutoff_hz`: low-pass cutoff (Hz).
 /// Returns:
 /// - `Vec<Complex32>`: filtered complex baseband samples.
-fn iq_downconvert(y: &[f32], fs: f32, fc: f32) -> Vec<Complex32> {
+fn iq_downconvert(y: &[f32], fs: f32, fc: f32, cutoff_hz: f32) -> Vec<Complex32> {
     let mixed: Vec<Complex32> = y
         .iter()
         .enumerate()
@@ -1291,7 +1341,11 @@ fn iq_downconvert(y: &[f32], fs: f32, fc: f32) -> Vec<Complex32> {
             Complex32::new(s, 0.0) * Complex32::from_polar(1.0, ph)
         })
         .collect();
-    lowpass_fir(&mixed, fs, 5_000.0, 65)
+    let mut out = lowpass_fir(&mixed, fs, cutoff_hz.max(100.0), 97);
+    for z in &mut out {
+        *z *= 2.0;
+    }
+    out
 }
 
 /// Generates a deterministic bipolar PN sequence.

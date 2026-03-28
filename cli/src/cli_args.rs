@@ -3,7 +3,10 @@
 use std::error::Error;
 use std::io::Read;
 
-use acoustic_ofdm::{EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions, SpectrogramWindow, WakePreamble};
+use acoustic_ofdm::{
+    EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions,
+    SpectrogramWindow, WakePreamble,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::live_profile::LiveProfileArg;
@@ -558,48 +561,59 @@ pub(crate) fn tx_audio_opts(cmd: &TxCmd) -> AudioOpts {
 }
 
 pub(crate) fn mic_roundtrip_audio_opts(cmd: &MicRoundtripCmd) -> AudioOpts {
-    let (duration_sec, mic_gain, spk_gain, pre_delay_sec, repeats, gap_sec, dump_wav, spectrogram, spectrogram_path, oracle, verbose) =
-        match cmd.profile {
-            LiveProfileArg::Standard => (
-                6.0,
-                1.0,
-                1.0,
-                0.2,
-                3,
-                0.35,
-                None,
-                false,
-                "/tmp/rx_spectrogram.png".to_string(),
-                false,
-                false,
-            ),
-            LiveProfileArg::LiveDebug => (
-                10.0,
-                0.2,
-                0.2,
-                0.5,
-                5,
-                0.35,
-                Some("/tmp/rx_capture.wav".to_string()),
-                true,
-                "/tmp/rx_spectrogram.png".to_string(),
-                true,
-                true,
-            ),
-            LiveProfileArg::Legacy4481483 => (
-                10.0,
-                0.2,
-                0.2,
-                0.5,
-                5,
-                0.35,
-                Some("/tmp/rx_capture.wav".to_string()),
-                true,
-                "/tmp/rx_spectrogram.png".to_string(),
-                true,
-                true,
-            ),
-        };
+    let (
+        duration_sec,
+        mic_gain,
+        spk_gain,
+        pre_delay_sec,
+        repeats,
+        gap_sec,
+        dump_wav,
+        spectrogram,
+        spectrogram_path,
+        oracle,
+        verbose,
+    ) = match cmd.profile {
+        LiveProfileArg::Standard => (
+            6.0,
+            1.0,
+            1.0,
+            0.2,
+            3,
+            0.35,
+            None,
+            false,
+            "/tmp/rx_spectrogram.png".to_string(),
+            false,
+            false,
+        ),
+        LiveProfileArg::LiveDebug => (
+            10.0,
+            0.2,
+            0.2,
+            0.5,
+            5,
+            0.35,
+            Some("/tmp/rx_capture.wav".to_string()),
+            true,
+            "/tmp/rx_spectrogram.png".to_string(),
+            true,
+            true,
+        ),
+        LiveProfileArg::Legacy4481483 => (
+            10.0,
+            0.2,
+            0.2,
+            0.5,
+            5,
+            0.35,
+            Some("/tmp/rx_capture.wav".to_string()),
+            true,
+            "/tmp/rx_spectrogram.png".to_string(),
+            true,
+            true,
+        ),
+    };
     AudioOpts {
         duration_sec: cmd.duration_sec.unwrap_or(duration_sec),
         mic_gain: cmd.mic_gain.unwrap_or(mic_gain),

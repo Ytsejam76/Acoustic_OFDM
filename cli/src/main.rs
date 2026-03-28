@@ -246,7 +246,10 @@ mod tests {
                 assert_eq!(cmd.out_png, "/tmp/out.png");
                 assert_eq!(cmd.spectrogram_nfft, 1024);
                 assert_eq!(cmd.spectrogram_hop, 256);
-                assert_eq!(cmd.spectrogram_window, crate::cli_args::SpectrogramWindowArg::Blackman);
+                assert_eq!(
+                    cmd.spectrogram_window,
+                    crate::cli_args::SpectrogramWindowArg::Blackman
+                );
             }
             _ => panic!("expected spectrogram"),
         }
@@ -412,8 +415,8 @@ mod tests {
 
     #[test]
     fn mic_roundtrip_live_debug_profile_defaults() {
-        let cli =
-            Cli::try_parse_from(["acoustic_ofdm_cli", "mic-roundtrip", "--oracle"]).expect("parse failed");
+        let cli = Cli::try_parse_from(["acoustic_ofdm_cli", "mic-roundtrip", "--oracle"])
+            .expect("parse failed");
         match cli.command {
             Commands::MicRoundtrip(cmd) => {
                 assert_eq!(cmd.profile, LiveProfileArg::LiveDebug);

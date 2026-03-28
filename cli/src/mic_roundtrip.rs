@@ -10,10 +10,9 @@ use acoustic_ofdm::{
     decode_single_packet_passband_with_sync, diagnose_passband_window_with_sync,
     dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
     dump_passband_constellation, dump_passband_iq_chain, inspect_packet_bytes,
-    recover_decided_packet_bytes_passband_with_sync,
-    save_channel_compare_png, save_constellation_comparison_png, save_spectrogram_png,
-    save_spectrogram_png_with_options, save_wav_mono_i16, OfdmConfig, PassbandBinDump,
-    PassbandChannelCompareDump, Complex32,
+    recover_decided_packet_bytes_passband_with_sync, save_channel_compare_png,
+    save_constellation_comparison_png, save_spectrogram_png, save_spectrogram_png_with_options,
+    save_wav_mono_i16, Complex32, OfdmConfig, PassbandBinDump, PassbandChannelCompareDump,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{traits::*, HeapRb};
@@ -25,7 +24,10 @@ use crate::{debug_line, info_line, warn_line};
 
 fn save_bin_dump_csv(path: &Path, dump: &PassbandBinDump) -> Result<(), Box<dyn Error>> {
     let mut file = std::fs::File::create(path)?;
-    writeln!(file, "data_symbol_idx,used_bin,role,pre_re,pre_im,post_re,post_im,ref_re,ref_im")?;
+    writeln!(
+        file,
+        "data_symbol_idx,used_bin,role,pre_re,pre_im,post_re,post_im,ref_re,ref_im"
+    )?;
     for row in &dump.rows {
         let (rr, ri) = row
             .reference
@@ -211,7 +213,11 @@ pub(crate) fn cmd_mic_roundtrip(
 
     info_line!("Captured samples: {}", rx.len());
     if let Some(path) = &opts.dump_tx_wav {
-        save_wav_mono_i16(Path::new(path), &tx_plan.scheduled, tx_plan.fs.round() as u32)?;
+        save_wav_mono_i16(
+            Path::new(path),
+            &tx_plan.scheduled,
+            tx_plan.fs.round() as u32,
+        )?;
         info_line!("Saved TX schedule: {path}");
     }
     if let Some(path) = &opts.dump_wav {
@@ -410,9 +416,12 @@ pub(crate) fn cmd_mic_roundtrip(
                 info_line!("Saved constellation CSV: {}", post_csv.display());
             }
             if opts.oracle {
-                if let Some(ch) =
-                    dump_passband_channel_compare_with_sync(payload, window, &cfg_rx, best.sync_off as f32)
-                {
+                if let Some(ch) = dump_passband_channel_compare_with_sync(
+                    payload,
+                    window,
+                    &cfg_rx,
+                    best.sync_off as f32,
+                ) {
                     let csv_path = dir.join("ofdm_channel_compare.csv");
                     let png_path = dir.join("ofdm_channel_compare.png");
                     save_channel_compare_csv(&csv_path, &ch)?;
@@ -424,10 +433,24 @@ pub(crate) fn cmd_mic_roundtrip(
             if let Some(chain) = dump_passband_iq_chain(window, &cfg_rx) {
                 let audio_prefix = dir.join("iq_down_audio_rate");
                 let bb_prefix = dir.join("iq_down_baseband_rate");
-                save_complex_parts_wav(&audio_prefix, &chain.downconverted_audio_rate, chain.fs_audio.round() as u32)?;
-                save_complex_parts_wav(&bb_prefix, &chain.baseband_rate, chain.fs_baseband.round() as u32)?;
-                info_line!("Saved IQ downconverted WAVs: {}.(re|im).wav", audio_prefix.display());
-                info_line!("Saved IQ baseband WAVs: {}.(re|im).wav", bb_prefix.display());
+                save_complex_parts_wav(
+                    &audio_prefix,
+                    &chain.downconverted_audio_rate,
+                    chain.fs_audio.round() as u32,
+                )?;
+                save_complex_parts_wav(
+                    &bb_prefix,
+                    &chain.baseband_rate,
+                    chain.fs_baseband.round() as u32,
+                )?;
+                info_line!(
+                    "Saved IQ downconverted WAVs: {}.(re|im).wav",
+                    audio_prefix.display()
+                );
+                info_line!(
+                    "Saved IQ baseband WAVs: {}.(re|im).wav",
+                    bb_prefix.display()
+                );
             }
         }
     }
@@ -472,9 +495,11 @@ pub(crate) fn cmd_mic_roundtrip(
     } else {
         if let Some(path) = &opts.dump_wav {
             if let Some(dir) = Path::new(path).parent() {
-                if let Some(raw) =
-                    recover_decided_packet_bytes_passband_with_sync(window, &cfg_rx, best.sync_off as f32)
-                {
+                if let Some(raw) = recover_decided_packet_bytes_passband_with_sync(
+                    window,
+                    &cfg_rx,
+                    best.sync_off as f32,
+                ) {
                     let raw_path = dir.join("ofdm_pre_crc_bytes.bin");
                     std::fs::write(&raw_path, &raw)?;
                     let inspect = inspect_packet_bytes(&raw);

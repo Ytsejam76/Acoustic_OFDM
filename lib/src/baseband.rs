@@ -92,7 +92,10 @@ pub(crate) fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<
     xbb
 }
 
-pub(crate) fn decode_packet_info_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Option<PacketInfo> {
+pub(crate) fn decode_packet_info_baseband(
+    rbb: &[Complex32],
+    cfg: &OfdmConfig,
+) -> Option<PacketInfo> {
     let rx_syms = equalized_data_symbols_baseband(rbb, cfg)?;
     recover_packet_from_symbols(&rx_syms, cfg)
 }
@@ -213,7 +216,9 @@ pub(crate) fn equalizer_initial_channel(
     train_known: &[Complex32],
 ) -> Vec<Complex32> {
     match cfg.equalizer_mode {
-        EqualizerMode::TrainingPilot => estimate_channel_from_training(ytrain, used_bins, train_known),
+        EqualizerMode::TrainingPilot => {
+            estimate_channel_from_training(ytrain, used_bins, train_known)
+        }
         EqualizerMode::PilotOnly => vec![Complex32::new(1.0, 0.0); used_bins.len()],
     }
 }
@@ -588,9 +593,15 @@ mod tests {
         cfg.base_freq_hz = Some(2_000.0);
         cfg.use_pilots = Some(false);
         let (used, pilots, data) = ofdm_bin_plan(&cfg);
-        assert_eq!(used, vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]);
+        assert_eq!(
+            used,
+            vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]
+        );
         assert!(pilots.is_empty());
-        assert_eq!(data, vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]);
+        assert_eq!(
+            data,
+            vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]
+        );
     }
 
     #[test]

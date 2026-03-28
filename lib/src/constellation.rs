@@ -158,7 +158,10 @@ pub fn save_channel_compare_png(
             .draw()?;
         chart
             .draw_series(std::iter::once(PathElement::new(
-                actual.iter().map(|(b, z)| (*b, z.norm())).collect::<Vec<_>>(),
+                actual
+                    .iter()
+                    .map(|(b, z)| (*b, z.norm()))
+                    .collect::<Vec<_>>(),
                 RGBColor(214, 39, 40),
             )))?
             .label("Actual")

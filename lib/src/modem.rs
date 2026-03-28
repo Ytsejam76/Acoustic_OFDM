@@ -4,9 +4,9 @@ use rustfft::num_complex::Complex32;
 
 use crate::baseband::{
     decode_packet_info_baseband, equalize_symbol_with_pilots, equalizer_initial_channel,
-    equalizer_refresh_channel, fft, known_pilot_symbols,
-    known_training_symbols, ofdm_bin_plan, packet_symbol_plan, regularized_equalize, PacketSymbolKind,
-    recover_decided_packet_bytes_baseband, tx_one_packet_baseband,
+    equalizer_refresh_channel, fft, known_pilot_symbols, known_training_symbols, ofdm_bin_plan,
+    packet_symbol_plan, recover_decided_packet_bytes_baseband, regularized_equalize,
+    tx_one_packet_baseband, PacketSymbolKind,
 };
 use crate::config::{Modulation, OfdmConfig, PassbandMode, WakePreamble};
 use crate::packet::{
@@ -867,7 +867,9 @@ pub fn dump_passband_channel_compare_with_sync(
     }
     let xsync_len = 2 * cfg.sync_half_len;
     let train_len = cfg.nfft + cfg.ncp;
-    if rbb_cfo.len() < xsync_len + train_len + cfg.nfft + cfg.ncp || xbb.len() < xsync_len + train_len {
+    if rbb_cfo.len() < xsync_len + train_len + cfg.nfft + cfg.ncp
+        || xbb.len() < xsync_len + train_len
+    {
         return None;
     }
 
@@ -947,13 +949,21 @@ pub fn dump_passband_channel_compare_with_sync(
                 den += pref[k].norm_sqr();
             }
         }
-        let g = if den > 1.0e-9 { num / den } else { Complex32::new(1.0, 0.0) };
+        let g = if den > 1.0e-9 {
+            num / den
+        } else {
+            Complex32::new(1.0, 0.0)
+        };
         for (k, &ubin) in used_bins.iter().enumerate() {
             let xref = x[ubin];
             if xref.norm() <= 1.0e-9 {
                 continue;
             }
-            let role = if pilot_bins.contains(&ubin) { "pilot" } else { "data" };
+            let role = if pilot_bins.contains(&ubin) {
+                "pilot"
+            } else {
+                "data"
+            };
             rows.push(PassbandChannelCompareRow {
                 data_symbol_idx: data_symbol_idx + 1,
                 used_bin: ubin,
@@ -1138,7 +1148,10 @@ fn decode_packet_from_passband_with_sync(
     decode_packet_from_synced_baseband(&rbb_sync, cfg)
 }
 
-fn decode_packet_from_synced_baseband(rbb_sync: &[Complex32], cfg: &OfdmConfig) -> Option<PacketInfo> {
+fn decode_packet_from_synced_baseband(
+    rbb_sync: &[Complex32],
+    cfg: &OfdmConfig,
+) -> Option<PacketInfo> {
     let coarse_cfo_hz = estimate_coarse_cfo_hz(rbb_sync, cfg);
     let mut tried = Vec::new();
     tried.push(coarse_cfo_hz);
@@ -1637,8 +1650,8 @@ mod tests {
         let cfg = OfdmConfig::default();
         let payload: Vec<u8> = (40..64).collect();
         let y = encode_single_packet_passband(&payload, &cfg);
-        let out = decode_single_packet_passband_with_sync(&y, &cfg, 0.0)
-            .expect("passband decode failed");
+        let out =
+            decode_single_packet_passband_with_sync(&y, &cfg, 0.0).expect("passband decode failed");
         assert_eq!(out, payload);
     }
 
@@ -1663,7 +1676,6 @@ mod tests {
         assert_eq!(qpsk_s[2], Complex32::new(-1.0 * k, 1.0 * k));
         assert_eq!(qpsk_s[3], Complex32::new(-1.0 * k, -1.0 * k));
     }
-
 }
 
 // vim: set ts=4 sw=4 et:

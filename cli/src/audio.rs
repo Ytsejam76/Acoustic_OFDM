@@ -65,7 +65,8 @@ pub(crate) fn build_input_stream(
             move |data: &[i16], _| {
                 if let Ok(mut p) = prod.lock() {
                     for frame in data.chunks_exact(channels) {
-                        let mono = frame.iter().map(|&s| i16_to_f32(s)).sum::<f32>() / (channels as f32);
+                        let mono =
+                            frame.iter().map(|&s| i16_to_f32(s)).sum::<f32>() / (channels as f32);
                         let _ = p.try_push(mono * gain);
                     }
                 }
@@ -78,7 +79,8 @@ pub(crate) fn build_input_stream(
             move |data: &[u16], _| {
                 if let Ok(mut p) = prod.lock() {
                     for frame in data.chunks_exact(channels) {
-                        let mono = frame.iter().map(|&s| u16_to_f32(s)).sum::<f32>() / (channels as f32);
+                        let mono =
+                            frame.iter().map(|&s| u16_to_f32(s)).sum::<f32>() / (channels as f32);
                         let _ = p.try_push(mono * gain);
                     }
                 }

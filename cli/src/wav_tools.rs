@@ -19,7 +19,10 @@ use crate::cli_args::{
 
 fn save_bin_dump_csv(path: &str, dump: &PassbandBinDump) -> Result<(), Box<dyn Error>> {
     let mut file = std::fs::File::create(path)?;
-    writeln!(file, "data_symbol_idx,used_bin,role,pre_re,pre_im,post_re,post_im,ref_re,ref_im")?;
+    writeln!(
+        file,
+        "data_symbol_idx,used_bin,role,pre_re,pre_im,post_re,post_im,ref_re,ref_im"
+    )?;
     for row in &dump.rows {
         let (rr, ri) = row
             .reference

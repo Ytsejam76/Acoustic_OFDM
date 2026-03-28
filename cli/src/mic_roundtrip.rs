@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 use acoustic_ofdm::{
     decode_single_packet_passband_with_sync, diagnose_passband_window_with_sync,
     dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
-    dump_passband_constellation, save_channel_compare_png, save_constellation_comparison_png, save_spectrogram_png,
+    dump_passband_constellation, dump_passband_iq_chain, inspect_packet_bytes,
+    recover_decided_packet_bytes_passband_with_sync,
+    save_channel_compare_png, save_constellation_comparison_png, save_spectrogram_png,
     save_spectrogram_png_with_options, save_wav_mono_i16, OfdmConfig, PassbandBinDump,
-    PassbandChannelCompareDump,
+    PassbandChannelCompareDump, Complex32,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{traits::*, HeapRb};
@@ -70,6 +72,20 @@ fn save_channel_compare_csv(
             row.estimated_h_pilot.im
         )?;
     }
+    Ok(())
+}
+
+fn save_complex_parts_wav(
+    prefix: &Path,
+    samples: &[Complex32],
+    sample_rate: u32,
+) -> Result<(), Box<dyn Error>> {
+    let re = samples.iter().map(|z| z.re).collect::<Vec<_>>();
+    let im = samples.iter().map(|z| z.im).collect::<Vec<_>>();
+    let re_path = prefix.with_extension("re.wav");
+    let im_path = prefix.with_extension("im.wav");
+    save_wav_mono_i16(&re_path, &re, sample_rate)?;
+    save_wav_mono_i16(&im_path, &im, sample_rate)?;
     Ok(())
 }
 
@@ -244,6 +260,10 @@ pub(crate) fn cmd_mic_roundtrip(
         nominal_start_sec: f32,
         start_sec: f32,
         sync_off: usize,
+        sync_rms: f32,
+        sync_peak: f32,
+        post_rms: f32,
+        post_peak: f32,
         train_rms: f32,
         train_evm: f32,
         pilot_evm: f32,
@@ -277,6 +297,10 @@ pub(crate) fn cmd_mic_roundtrip(
                 nominal_start_sec,
                 start_sec,
                 sync_off,
+                sync_rms: diag.sync_rms,
+                sync_peak: diag.sync_peak,
+                post_rms: diag.post_rms,
+                post_peak: diag.post_peak,
                 train_rms: diag.train_rms,
                 train_evm: diag.train_recon_evm,
                 pilot_evm: diag.pilot_residual_evm,
@@ -311,11 +335,15 @@ pub(crate) fn cmd_mic_roundtrip(
         }
         if let Some(best) = best_local {
             info_line!(
-                "Burst {}: nominal={:.3}s best_start={:.3}s sync_off={} evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}] decoded={}",
+                "Burst {}: nominal={:.3}s best_start={:.3}s sync_off={} level[sync/post]=[peak {:.3}/{:.3}, rms {:.3}/{:.3}] evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}] decoded={}",
                 best.burst_idx,
                 best.nominal_start_sec,
                 best.start_sec,
                 best.sync_off,
+                best.sync_peak,
+                best.post_peak,
+                best.sync_rms,
+                best.post_rms,
                 best.train_evm,
                 best.pilot_evm,
                 best.data_evm,
@@ -393,6 +421,14 @@ pub(crate) fn cmd_mic_roundtrip(
                     info_line!("Saved channel compare PNG: {}", png_path.display());
                 }
             }
+            if let Some(chain) = dump_passband_iq_chain(window, &cfg_rx) {
+                let audio_prefix = dir.join("iq_down_audio_rate");
+                let bb_prefix = dir.join("iq_down_baseband_rate");
+                save_complex_parts_wav(&audio_prefix, &chain.downconverted_audio_rate, chain.fs_audio.round() as u32)?;
+                save_complex_parts_wav(&bb_prefix, &chain.baseband_rate, chain.fs_baseband.round() as u32)?;
+                info_line!("Saved IQ downconverted WAVs: {}.(re|im).wav", audio_prefix.display());
+                info_line!("Saved IQ baseband WAVs: {}.(re|im).wav", bb_prefix.display());
+            }
         }
     }
     if let Some(dump) = dump_passband_bins_with_sync(window, &cfg_rx, best.sync_off as f32) {
@@ -434,6 +470,27 @@ pub(crate) fn cmd_mic_roundtrip(
         }
         Ok(())
     } else {
+        if let Some(path) = &opts.dump_wav {
+            if let Some(dir) = Path::new(path).parent() {
+                if let Some(raw) =
+                    recover_decided_packet_bytes_passband_with_sync(window, &cfg_rx, best.sync_off as f32)
+                {
+                    let raw_path = dir.join("ofdm_pre_crc_bytes.bin");
+                    std::fs::write(&raw_path, &raw)?;
+                    let inspect = inspect_packet_bytes(&raw);
+                    info_line!("Saved pre-CRC bytes: {}", raw_path.display());
+                    info_line!(
+                        "Pre-CRC packet inspect: preamble_ok={} header_ok={} payload_len={:?} total_len={:?} enough_total={} crc_ok={}",
+                        inspect.preamble_ok,
+                        inspect.enough_for_header,
+                        inspect.payload_len,
+                        inspect.total_len,
+                        inspect.enough_for_total,
+                        inspect.crc_ok
+                    );
+                }
+            }
+        }
         Err(format!(
             "roundtrip decode failed: best burst={} start={:.3}s sync_off={} evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}]",
             best.burst_idx,

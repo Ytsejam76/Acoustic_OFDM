@@ -6,7 +6,7 @@ use crate::baseband::{
     decode_packet_info_baseband, equalize_symbol_with_pilots, equalizer_initial_channel,
     equalizer_refresh_channel, fft, known_pilot_symbols,
     known_training_symbols, ofdm_bin_plan, packet_symbol_plan, regularized_equalize, PacketSymbolKind,
-    tx_one_packet_baseband,
+    recover_decided_packet_bytes_baseband, tx_one_packet_baseband,
 };
 use crate::config::{Modulation, OfdmConfig, PassbandMode, WakePreamble};
 use crate::packet::{
@@ -33,6 +33,10 @@ pub struct PassbandDiagnostics {
     pub enough_samples: bool,
     pub sync_off: usize,
     pub cfo_hz: f32,
+    pub sync_rms: f32,
+    pub sync_peak: f32,
+    pub post_rms: f32,
+    pub post_peak: f32,
     pub train_rms: f32,
     pub hest_mag_min: f32,
     pub hest_mag_mean: f32,
@@ -95,6 +99,14 @@ pub struct PassbandSyncDump {
     pub coarse_sync_off: usize,
     pub refined_sync_off: usize,
     pub metrics: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PassbandIqChainDump {
+    pub downconverted_audio_rate: Vec<Complex32>,
+    pub baseband_rate: Vec<Complex32>,
+    pub fs_audio: f32,
+    pub fs_baseband: f32,
 }
 
 fn pilot_phase_error(
@@ -324,6 +336,28 @@ pub fn decode_single_packet_passband_with_sync(
     decode_packet_from_passband_with_sync(pkt_audio, cfg, sync_off).map(|p| p.payload)
 }
 
+pub fn recover_decided_packet_bytes_passband_with_sync(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+    sync_off: f32,
+) -> Option<Vec<u8>> {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let rbb_full = downconvert_passband(&chunk, cfg);
+    let rbb = &rbb_full[pre..];
+    let rbb_sync = resample_from_offset(rbb, sync_off);
+    let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
+    recover_decided_packet_bytes_baseband(&rbb_cfo, cfg)
+}
+
 /// Produces diagnostics for one passband packet window.
 ///
 /// Parameters:
@@ -363,6 +397,10 @@ fn diagnose_passband_window_with_sync_opt(
             enough_samples: false,
             sync_off: 0,
             cfo_hz: 0.0,
+            sync_rms: 0.0,
+            sync_peak: 0.0,
+            post_rms: 0.0,
+            post_peak: 0.0,
             train_rms: 0.0,
             hest_mag_min: 0.0,
             hest_mag_mean: 0.0,
@@ -396,6 +434,10 @@ fn diagnose_passband_window_with_sync_opt(
             enough_samples: false,
             sync_off: sync_off.round() as usize,
             cfo_hz,
+            sync_rms: 0.0,
+            sync_peak: 0.0,
+            post_rms: 0.0,
+            post_peak: 0.0,
             train_rms: 0.0,
             hest_mag_min: 0.0,
             hest_mag_mean: 0.0,
@@ -410,6 +452,21 @@ fn diagnose_passband_window_with_sync_opt(
     }
 
     let train_start = xsync_len;
+    let sync_slice = &rbb_cfo[..xsync_len.min(rbb_cfo.len())];
+    let data_post_start = (xsync_len + train_len).min(rbb_cfo.len());
+    let post_slice = &rbb_cfo[data_post_start..];
+    let sync_rms = if sync_slice.is_empty() {
+        0.0
+    } else {
+        (sync_slice.iter().map(|v| v.norm_sqr()).sum::<f32>() / sync_slice.len() as f32).sqrt()
+    };
+    let sync_peak = sync_slice.iter().map(|v| v.norm()).fold(0.0f32, f32::max);
+    let post_rms = if post_slice.is_empty() {
+        0.0
+    } else {
+        (post_slice.iter().map(|v| v.norm_sqr()).sum::<f32>() / post_slice.len() as f32).sqrt()
+    };
+    let post_peak = post_slice.iter().map(|v| v.norm()).fold(0.0f32, f32::max);
     let train_no_cp = &rbb_cfo[train_start + cfg.ncp..train_start + cfg.ncp + cfg.nfft];
     let train_rms =
         (train_no_cp.iter().map(|v| v.norm_sqr()).sum::<f32>() / (train_no_cp.len() as f32)).sqrt();
@@ -476,6 +533,10 @@ fn diagnose_passband_window_with_sync_opt(
         enough_samples: true,
         sync_off: sync_off.round() as usize,
         cfo_hz,
+        sync_rms,
+        sync_peak,
+        post_rms,
+        post_peak,
         train_rms,
         hest_mag_min,
         hest_mag_mean,
@@ -935,6 +996,30 @@ pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<
         coarse_sync_off,
         refined_sync_off: refined_sync_off.round() as usize,
         metrics,
+    })
+}
+
+pub fn dump_passband_iq_chain(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandIqChainDump> {
+    let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
+    let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
+    if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
+        return None;
+    }
+
+    let passband = &pkt_audio[wake_len + guard_len..];
+    let pre = 128usize.min(passband.len());
+    let mut chunk = vec![0.0f32; pre];
+    chunk.extend_from_slice(passband);
+    let down_audio = iq_downconvert(&chunk, cfg.fs, cfg.fc, passband_lpf_cutoff_hz(cfg));
+    let baseband = match cfg.passband_mode {
+        PassbandMode::Legacy => down_audio.clone(),
+        PassbandMode::Iq => resample_complex_linear_rate(&down_audio, cfg.fs, cfg.fs_baseband),
+    };
+    Some(PassbandIqChainDump {
+        downconverted_audio_rate: down_audio[pre..].to_vec(),
+        baseband_rate: baseband[pre.min(baseband.len())..].to_vec(),
+        fs_audio: cfg.fs,
+        fs_baseband: active_baseband_fs(cfg),
     })
 }
 

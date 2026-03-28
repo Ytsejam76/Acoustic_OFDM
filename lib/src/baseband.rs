@@ -34,6 +34,15 @@ pub fn recover_single_packet_data_symbols(
     equalized_data_symbols_baseband(rbb, cfg)
 }
 
+pub(crate) fn recover_decided_packet_bytes_baseband(
+    rbb: &[Complex32],
+    cfg: &OfdmConfig,
+) -> Option<Vec<u8>> {
+    let rx_syms = equalized_data_symbols_baseband(rbb, cfg)?;
+    let bits = demap_bits(&rx_syms, cfg.modulation);
+    Some(bits_to_bytes(&bits))
+}
+
 pub(crate) fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> {
     let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
     let bits = bytes_to_bits(pkt_bytes);

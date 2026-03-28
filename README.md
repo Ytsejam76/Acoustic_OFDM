@@ -129,43 +129,43 @@ There are two families:
 Transmit repeated BPSK bursts:
 
 ```bash
-bash tx_simple.sh
+bash scripts/tx_simple.sh
 ```
 
 Transmit repeated BPSK bursts with IQ mode:
 
 ```bash
-bash tx_iq.sh
+bash scripts/tx_iq.sh
 ```
 
 Transmit repeated QPSK bursts:
 
 ```bash
-bash tx_qpsk.sh
+bash scripts/tx_qpsk.sh
 ```
 
 Generate the OFDM body only (first transmission, no wake/calibration):
 
 ```bash
-bash tx_symbols_only.sh
+bash scripts/tx_symbols_only.sh
 ```
 
 Coordinated speaker/mic roundtrip, BPSK:
 
 ```bash
-bash rx_decode_simple.sh
+bash scripts/rx_decode_simple.sh
 ```
 
 Coordinated speaker/mic roundtrip, BPSK, IQ mode:
 
 ```bash
-bash rx_decode_iq.sh
+bash scripts/rx_decode_iq.sh
 ```
 
 Coordinated speaker/mic roundtrip, QPSK:
 
 ```bash
-bash rx_decode_qpsk.sh
+bash scripts/rx_decode_qpsk.sh
 ```
 
 Artifacts are written under `output/`, including:
@@ -188,13 +188,13 @@ It uses known scheduled burst times and only searches a small `sync_off` range.
 
 The scripts take no positional parameters. They are meant to be stable presets.
 
-- `tx_simple.sh`
+- `scripts/tx_simple.sh`
   - legacy passband mode
   - BPSK
   - 8 repeats
   - writes `output/tx.wav`
 
-- `rx_decode_simple.sh`
+- `scripts/rx_decode_simple.sh`
   - legacy passband mode
   - BPSK
   - one coordinated speaker/mic transmission
@@ -208,30 +208,30 @@ The scripts take no positional parameters. They are meant to be stable presets.
   - log file:
     - `acoustic_ofdm_mic_roundtrip.log`
 
-- `tx_qpsk.sh`
+- `scripts/tx_qpsk.sh`
   - legacy passband mode
   - QPSK
   - writes `output/tx_qpsk.wav`
 
-- `rx_decode_qpsk.sh`
+- `scripts/rx_decode_qpsk.sh`
   - legacy passband mode
   - QPSK
   - writes QPSK-specific WAVs and spectrogram
   - log file:
     - `acoustic_ofdm_mic_roundtrip_qpsk.log`
 
-- `tx_symbols_only.sh`
+- `scripts/tx_symbols_only.sh`
   - writes only the OFDM body for one packet
   - no wake, no guard, no calibration
   - useful for listening to the payload itself
 
-- `tx_iq.sh`
+- `scripts/tx_iq.sh`
   - IQ passband mode
   - `fs_baseband = 22050`
   - BPSK
   - writes `output/tx_iq.wav`
 
-- `rx_decode_iq.sh`
+- `scripts/rx_decode_iq.sh`
   - IQ passband mode
   - `fs_baseband = 22050`
   - BPSK
@@ -242,11 +242,11 @@ The scripts take no positional parameters. They are meant to be stable presets.
 Recommended workflow:
 
 1. Start with the working baseline:
-   - `bash rx_decode_simple.sh`
+   - `bash scripts/rx_decode_simple.sh`
 2. Compare against QPSK if needed:
-   - `bash rx_decode_qpsk.sh`
+   - `bash scripts/rx_decode_qpsk.sh`
 3. Compare the alternate passband implementation:
-   - `bash rx_decode_iq.sh`
+   - `bash scripts/rx_decode_iq.sh`
 
 That keeps the baseline and the experimental IQ path separate.
 

@@ -89,6 +89,64 @@ pub fn parse_packet_bytes(rx: &[u8]) -> Option<(PacketInfo, usize)> {
     ))
 }
 
+#[derive(Clone, Debug)]
+pub struct PacketParseAttempt {
+    pub preamble_ok: bool,
+    pub enough_for_header: bool,
+    pub payload_len: Option<usize>,
+    pub total_len: Option<usize>,
+    pub enough_for_total: bool,
+    pub crc_ok: bool,
+    pub parsed: Option<PacketInfo>,
+}
+
+pub fn inspect_packet_bytes(rx: &[u8]) -> PacketParseAttempt {
+    if rx.len() < 9 {
+        return PacketParseAttempt {
+            preamble_ok: rx.len() >= 2 && rx[0] == 0xA5 && rx[1] == 0x5A,
+            enough_for_header: false,
+            payload_len: None,
+            total_len: None,
+            enough_for_total: false,
+            crc_ok: false,
+            parsed: None,
+        };
+    }
+
+    let preamble_ok = rx[0] == 0xA5 && rx[1] == 0x5A;
+    let plen = rx[8] as usize;
+    let total = 9 + plen + 2;
+    let enough_for_total = rx.len() >= total;
+    let crc_ok = if preamble_ok && enough_for_total {
+        let body = &rx[..9 + plen];
+        let rx_crc = u16::from_be_bytes([rx[9 + plen], rx[10 + plen]]);
+        crc16_ccitt(body) == rx_crc
+    } else {
+        false
+    };
+    let parsed = if preamble_ok && crc_ok {
+        Some(PacketInfo {
+            version: rx[2],
+            mod_id: rx[3],
+            session_id: u16::from_be_bytes([rx[4], rx[5]]),
+            frag_index: rx[6],
+            frag_count: rx[7],
+            payload: rx[9..9 + plen].to_vec(),
+        })
+    } else {
+        None
+    };
+    PacketParseAttempt {
+        preamble_ok,
+        enough_for_header: true,
+        payload_len: Some(plen),
+        total_len: Some(total),
+        enough_for_total,
+        crc_ok,
+        parsed,
+    }
+}
+
 /// Expands bytes into MSB-first bits.
 ///
 /// Parameters:

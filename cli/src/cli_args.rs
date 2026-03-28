@@ -98,6 +98,12 @@ pub(crate) struct CommonCfgArgs {
     pub(crate) base_freq_hz: Option<f32>,
     #[arg(long)]
     pub(crate) fs_baseband: Option<f32>,
+    #[arg(long)]
+    pub(crate) nfft: Option<usize>,
+    #[arg(long)]
+    pub(crate) ncp: Option<usize>,
+    #[arg(long)]
+    pub(crate) sync_half_len: Option<usize>,
     #[arg(short = 'm', long, value_enum)]
     pub(crate) modulation: Option<ModulationArg>,
     #[arg(long, value_enum)]
@@ -366,6 +372,21 @@ pub(crate) fn apply_common_cfg(
             return Err("baseband sample rate must be a positive finite number".into());
         }
         cfg.fs_baseband = fs_baseband;
+    }
+    if let Some(nfft) = common.nfft {
+        if nfft == 0 {
+            return Err("nfft must be positive".into());
+        }
+        cfg.nfft = nfft;
+    }
+    if let Some(ncp) = common.ncp {
+        cfg.ncp = ncp;
+    }
+    if let Some(sync_half_len) = common.sync_half_len {
+        if sync_half_len == 0 {
+            return Err("sync-half-len must be positive".into());
+        }
+        cfg.sync_half_len = sync_half_len;
     }
     if let Some(m) = common.modulation {
         cfg.modulation = m.into();

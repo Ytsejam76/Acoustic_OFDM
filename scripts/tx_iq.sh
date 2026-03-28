@@ -10,6 +10,7 @@ mkdir -p "$OUT_DIR"
 exec cargo run -p acoustic_ofdm_cli -- \
   tx \
   --profile live-debug \
+  --fec-mode hamming74 \
   --passband-mode iq \
   --fs-baseband 16000 \
   --nfft 2048 \

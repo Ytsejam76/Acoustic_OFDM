@@ -4,7 +4,8 @@ use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::config::{EqualizerMode, Modulation, OfdmConfig, PassbandMode};
 use crate::packet::{
-    bits_to_bytes, build_packet_bytes, bytes_to_bits, parse_packet_bytes, PacketInfo,
+    bits_to_bytes, build_packet_bytes, bytes_to_bits, fec_decode_bits, fec_encode_bits,
+    fec_encoded_bits_len, parse_packet_bytes, PacketInfo,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,12 +41,14 @@ pub(crate) fn recover_decided_packet_bytes_baseband(
 ) -> Option<Vec<u8>> {
     let rx_syms = equalized_data_symbols_baseband(rbb, cfg)?;
     let bits = demap_bits(&rx_syms, cfg.modulation);
-    Some(bits_to_bytes(&bits))
+    let raw_bits = fec_decode_bits(&bits, cfg.fec_mode);
+    Some(bits_to_bytes(&raw_bits))
 }
 
 pub(crate) fn tx_one_packet_baseband(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Complex32> {
     let (used_bins, pilot_bins, data_bins) = ofdm_bin_plan(cfg);
-    let bits = bytes_to_bits(pkt_bytes);
+    let raw_bits = bytes_to_bits(pkt_bytes);
+    let bits = fec_encode_bits(&raw_bits, cfg.fec_mode);
     let mut payload_syms = map_bits(&bits, cfg.modulation);
     let syms_per_ofdm = data_bins.len();
     if syms_per_ofdm == 0 {
@@ -115,7 +118,7 @@ fn equalized_data_symbols_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Optio
 
     let data_start = xsync_len + train_len;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
+    let max_bits = fec_encoded_bits_len(max_payload_bytes * 8, cfg.fec_mode);
     let max_data_ofdm = max_bits.div_ceil(n_data_carriers * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
     let mut rx_syms = Vec::<Complex32>::new();
@@ -152,7 +155,8 @@ fn expected_packet_data_symbols(pkt_bytes: &[u8], cfg: &OfdmConfig) -> Vec<Compl
         return Vec::new();
     }
     let bits = bytes_to_bits(pkt_bytes);
-    let mut payload_syms = map_bits(&bits, cfg.modulation);
+    let coded_bits = fec_encode_bits(&bits, cfg.fec_mode);
+    let mut payload_syms = map_bits(&coded_bits, cfg.modulation);
     let n_data = payload_syms.len().div_ceil(syms_per_ofdm);
     payload_syms.resize(n_data * syms_per_ofdm, Complex32::new(0.0, 0.0));
     payload_syms
@@ -357,7 +361,8 @@ pub(crate) fn demap_bits(syms: &[Complex32], modulation: Modulation) -> Vec<u8> 
 
 fn recover_packet_from_symbols(syms: &[Complex32], cfg: &OfdmConfig) -> Option<PacketInfo> {
     let bits = demap_bits(syms, cfg.modulation);
-    let bytes = bits_to_bytes(&bits);
+    let raw_bits = fec_decode_bits(&bits, cfg.fec_mode);
+    let bytes = bits_to_bytes(&raw_bits);
     parse_packet_bytes(&bytes).map(|(pkt, _)| pkt)
 }
 
@@ -586,5 +591,15 @@ mod tests {
         assert_eq!(used, vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]);
         assert!(pilots.is_empty());
         assert_eq!(data, vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]);
+    }
+
+    #[test]
+    fn decode_single_packet_baseband_with_hamming_fec() {
+        let mut cfg = OfdmConfig::default();
+        cfg.fec_mode = crate::config::FecMode::Hamming74;
+        let payload: Vec<u8> = (0..24).map(|x| x ^ 0x33).collect();
+        let xbb = encode_single_packet_baseband(&payload, &cfg);
+        let out = decode_packet_baseband(&xbb, &cfg).expect("baseband decode failed");
+        assert_eq!(out, payload);
     }
 }

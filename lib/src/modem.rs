@@ -10,7 +10,7 @@ use crate::baseband::{
 };
 use crate::config::{Modulation, OfdmConfig, PassbandMode, WakePreamble};
 use crate::packet::{
-    build_packet_bytes, modulation_from_id, split_payload, PacketInfo,
+    build_packet_bytes, fec_encoded_bits_len, modulation_from_id, split_payload, PacketInfo,
 };
 
 #[derive(Clone, Debug)]
@@ -482,7 +482,7 @@ fn diagnose_passband_window_with_sync_opt(
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
+    let max_bits = fec_encoded_bits_len(max_payload_bytes * 8, cfg.fec_mode);
     let max_data_ofdm =
         max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
@@ -598,7 +598,7 @@ pub fn dump_passband_constellation(
     let mut pre_eq = Vec::new();
     let mut post_eq = Vec::new();
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
+    let max_bits = fec_encoded_bits_len(max_payload_bytes * 8, cfg.fec_mode);
     let max_data_ofdm =
         max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
@@ -674,7 +674,7 @@ pub fn dump_passband_pilot_tracking(
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
+    let max_bits = fec_encoded_bits_len(max_payload_bytes * 8, cfg.fec_mode);
     let max_data_ofdm =
         max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
@@ -784,7 +784,7 @@ fn dump_passband_bins_with_sync_opt(
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
+    let max_bits = fec_encoded_bits_len(max_payload_bytes * 8, cfg.fec_mode);
     let max_data_ofdm =
         max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);
@@ -880,7 +880,7 @@ pub fn dump_passband_channel_compare_with_sync(
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
-    let max_bits = max_payload_bytes * 8;
+    let max_bits = fec_encoded_bits_len(max_payload_bytes * 8, cfg.fec_mode);
     let max_data_ofdm =
         max_bits.div_ceil(data_bins.len().max(1) * cfg.modulation.bits_per_symbol()) + 2;
     let symbol_plan = packet_symbol_plan(max_data_ofdm, cfg);

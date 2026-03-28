@@ -29,17 +29,20 @@ rm -f \
 
 cargo run -p acoustic_ofdm_cli -- \
   encode \
+  --fec-mode hamming74 \
   "$OUT_DIR/tx_packet.wav" \
   ACOUSTIC-OFDM-ORACLE
 
 cargo run -p acoustic_ofdm_cli -- \
   encode-body \
+  --fec-mode hamming74 \
   "$OUT_DIR/tx_symbols_only.wav" \
   ACOUSTIC-OFDM-ORACLE
 
 exec cargo run -p acoustic_ofdm_cli -- \
   mic-roundtrip \
   --profile live-debug \
+  --fec-mode hamming74 \
   --duration-sec "$DURATION" \
   --mic-gain 0.6 \
   --spk-gain 0.6 \

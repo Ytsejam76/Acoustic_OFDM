@@ -13,6 +13,12 @@ pub enum EqualizerMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FecMode {
+    None,
+    Hamming74,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PassbandMode {
     Legacy,
     Iq,
@@ -104,6 +110,7 @@ pub struct OfdmConfig {
     pub terminal_training_symbol: bool,
     pub modulation: Modulation,
     pub equalizer_mode: EqualizerMode,
+    pub fec_mode: FecMode,
     pub passband_mode: PassbandMode,
     pub wake_ms: f32,
     pub wake_freq: f32,
@@ -140,6 +147,7 @@ impl Default for OfdmConfig {
             terminal_training_symbol: false,
             modulation: Modulation::Bpsk,
             equalizer_mode: EqualizerMode::TrainingPilot,
+            fec_mode: FecMode::None,
             passband_mode: PassbandMode::Legacy,
             wake_ms: 80.0,
             wake_freq: 5_500.0,

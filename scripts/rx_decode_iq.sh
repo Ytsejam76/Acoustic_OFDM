@@ -26,6 +26,7 @@ rm -f \
 
 cargo run -p acoustic_ofdm_cli -- \
   encode \
+  --fec-mode hamming74 \
   --passband-mode iq \
   --fs-baseband 16000 \
   --nfft 2048 \
@@ -36,6 +37,7 @@ cargo run -p acoustic_ofdm_cli -- \
 
 cargo run -p acoustic_ofdm_cli -- \
   encode-body \
+  --fec-mode hamming74 \
   --passband-mode iq \
   --fs-baseband 16000 \
   --nfft 2048 \
@@ -47,6 +49,7 @@ cargo run -p acoustic_ofdm_cli -- \
 exec cargo run -p acoustic_ofdm_cli -- \
   mic-roundtrip \
   --profile live-debug \
+  --fec-mode hamming74 \
   --passband-mode iq \
   --fs-baseband 16000 \
   --nfft 2048 \

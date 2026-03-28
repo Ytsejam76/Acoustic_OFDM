@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::io::Read;
 
-use acoustic_ofdm::{EqualizerMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions, SpectrogramWindow, WakePreamble};
+use acoustic_ofdm::{EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions, SpectrogramWindow, WakePreamble};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::live_profile::LiveProfileArg;
@@ -27,6 +27,12 @@ pub(crate) enum ModulationArg {
 pub(crate) enum EqualizerModeArg {
     TrainingPilot,
     PilotOnly,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum FecModeArg {
+    None,
+    Hamming74,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -83,6 +89,15 @@ impl From<EqualizerModeArg> for EqualizerMode {
     }
 }
 
+impl From<FecModeArg> for FecMode {
+    fn from(value: FecModeArg) -> Self {
+        match value {
+            FecModeArg::None => FecMode::None,
+            FecModeArg::Hamming74 => FecMode::Hamming74,
+        }
+    }
+}
+
 impl From<PassbandModeArg> for PassbandMode {
     fn from(value: PassbandModeArg) -> Self {
         match value {
@@ -108,6 +123,8 @@ pub(crate) struct CommonCfgArgs {
     pub(crate) modulation: Option<ModulationArg>,
     #[arg(long, value_enum)]
     pub(crate) equalizer_mode: Option<EqualizerModeArg>,
+    #[arg(long, value_enum)]
+    pub(crate) fec_mode: Option<FecModeArg>,
     #[arg(long, value_enum)]
     pub(crate) passband_mode: Option<PassbandModeArg>,
     #[arg(short = 'w', long, value_enum)]
@@ -393,6 +410,9 @@ pub(crate) fn apply_common_cfg(
     }
     if let Some(m) = common.equalizer_mode {
         cfg.equalizer_mode = m.into();
+    }
+    if let Some(m) = common.fec_mode {
+        cfg.fec_mode = m.into();
     }
     if let Some(m) = common.passband_mode {
         cfg.passband_mode = m.into();

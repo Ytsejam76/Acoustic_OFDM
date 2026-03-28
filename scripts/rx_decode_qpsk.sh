@@ -25,12 +25,14 @@ rm -f \
 
 cargo run -p acoustic_ofdm_cli -- \
   encode \
+  --fec-mode hamming74 \
   --modulation qpsk \
   "$OUT_DIR/tx_packet_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
 
 cargo run -p acoustic_ofdm_cli -- \
   encode-body \
+  --fec-mode hamming74 \
   --modulation qpsk \
   "$OUT_DIR/tx_symbols_only_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
@@ -38,6 +40,7 @@ cargo run -p acoustic_ofdm_cli -- \
 exec cargo run -p acoustic_ofdm_cli -- \
   mic-roundtrip \
   --profile live-debug \
+  --fec-mode hamming74 \
   --modulation qpsk \
   --duration-sec "$DURATION" \
   --mic-gain 0.6 \

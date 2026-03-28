@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
-use crate::config::{Modulation, OfdmConfig};
+use crate::config::{FecMode, Modulation, OfdmConfig};
 use crate::crc::crc16_ccitt;
 
 #[derive(Clone, Debug)]
@@ -182,6 +182,64 @@ pub fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
     out
 }
 
+pub fn fec_encoded_bits_len(raw_bits_len: usize, mode: FecMode) -> usize {
+    match mode {
+        FecMode::None => raw_bits_len,
+        FecMode::Hamming74 => raw_bits_len.div_ceil(4) * 7,
+    }
+}
+
+pub fn fec_encode_bits(bits: &[u8], mode: FecMode) -> Vec<u8> {
+    match mode {
+        FecMode::None => bits.to_vec(),
+        FecMode::Hamming74 => {
+            let mut out = Vec::with_capacity(fec_encoded_bits_len(bits.len(), mode));
+            let mut i = 0usize;
+            while i < bits.len() {
+                let d1 = bits.get(i).copied().unwrap_or(0) & 1;
+                let d2 = bits.get(i + 1).copied().unwrap_or(0) & 1;
+                let d3 = bits.get(i + 2).copied().unwrap_or(0) & 1;
+                let d4 = bits.get(i + 3).copied().unwrap_or(0) & 1;
+                let p1 = d1 ^ d2 ^ d4;
+                let p2 = d1 ^ d3 ^ d4;
+                let p3 = d2 ^ d3 ^ d4;
+                out.extend_from_slice(&[p1, p2, d1, p3, d2, d3, d4]);
+                i += 4;
+            }
+            out
+        }
+    }
+}
+
+pub fn fec_decode_bits(bits: &[u8], mode: FecMode) -> Vec<u8> {
+    match mode {
+        FecMode::None => bits.to_vec(),
+        FecMode::Hamming74 => {
+            let mut out = Vec::with_capacity((bits.len() / 7) * 4);
+            for chunk in bits.chunks_exact(7) {
+                let mut c = [
+                    chunk[0] & 1,
+                    chunk[1] & 1,
+                    chunk[2] & 1,
+                    chunk[3] & 1,
+                    chunk[4] & 1,
+                    chunk[5] & 1,
+                    chunk[6] & 1,
+                ];
+                let s1 = c[0] ^ c[2] ^ c[4] ^ c[6];
+                let s2 = c[1] ^ c[2] ^ c[5] ^ c[6];
+                let s3 = c[3] ^ c[4] ^ c[5] ^ c[6];
+                let syndrome = (s1 | (s2 << 1) | (s3 << 2)) as usize;
+                if (1..=7).contains(&syndrome) {
+                    c[syndrome - 1] ^= 1;
+                }
+                out.extend_from_slice(&[c[2], c[4], c[5], c[6]]);
+            }
+            out
+        }
+    }
+}
+
 /// Converts header modulation ID to enum.
 ///
 /// Parameters:
@@ -245,6 +303,17 @@ mod tests {
         let n = pkt.len();
         pkt[n - 1] ^= 0x01;
         assert!(parse_packet_bytes(&pkt).is_none());
+    }
+
+    #[test]
+    fn hamming74_roundtrip_and_single_bit_correction() {
+        let raw = bytes_to_bits(&[0xA5, 0x5A, 0x13, 0x7C]);
+        let mut enc = fec_encode_bits(&raw, FecMode::Hamming74);
+        assert_eq!(enc.len(), raw.len() / 4 * 7);
+        enc[5] ^= 1;
+        enc[20] ^= 1;
+        let dec = fec_decode_bits(&enc, FecMode::Hamming74);
+        assert_eq!(dec, raw);
     }
 }
 

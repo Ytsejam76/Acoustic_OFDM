@@ -4,7 +4,7 @@ use rustfft::num_complex::Complex32;
 
 use crate::baseband::{fft, known_pilot_symbols, known_training_symbols, ofdm_bin_plan};
 use crate::config::OfdmConfig;
-use crate::eq::{equalize_symbol_with_pilots, regularized_equalize, rms_evm};
+use crate::equalizer::{equalize_symbol_with_pilots, regularized_equalize, rms_evm};
 
 /// Returns the active DSP sample rate seen by the modem.
 ///

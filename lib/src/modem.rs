@@ -13,7 +13,7 @@ use crate::debug::{
     PassbandChannelCompareDump, PassbandChannelCompareRow, PassbandConstellationDump,
     PassbandDiagnostics, PassbandIqChainDump, PassbandPilotTrackDump, PassbandSyncDump,
 };
-use crate::eq::{
+use crate::equalizer::{
     decision_directed_evm, equalize_symbol_with_pilots, equalizer_initial_channel,
     equalizer_refresh_channel, regularized_equalize, rms_evm,
 };
@@ -1189,7 +1189,7 @@ fn fir_lowpass(len: usize, cutoff_hz: f32, fs: f32) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::config::Modulation;
-    use crate::eq::hard_slice_symbols;
+    use crate::equalizer::hard_slice_symbols;
 
     #[test]
     /// Verifies full BPSK oracle burst round-trip.

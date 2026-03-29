@@ -3,7 +3,7 @@
 use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::config::{Modulation, OfdmConfig, PassbandMode};
-use crate::eq::{
+use crate::equalizer::{
     equalize_symbol_with_pilots, equalizer_initial_channel, equalizer_refresh_channel,
 };
 use crate::packet::{

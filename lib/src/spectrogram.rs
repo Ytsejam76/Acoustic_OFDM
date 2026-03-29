@@ -6,14 +6,28 @@ use std::path::Path;
 use plotters::prelude::*;
 use rustfft::{num_complex::Complex32, FftPlanner};
 
+/// Analysis window used for STFT-based spectrogram generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpectrogramWindow {
+    /// Hann window, good general-purpose sidelobe suppression.
+    ///
+    /// Reference: [Wikipedia: Hann window](https://en.wikipedia.org/wiki/Window_function#Hann_window)
     Hann,
+    /// Hamming window, slightly narrower main lobe than Hann.
+    ///
+    /// Reference: [Wikipedia: Hamming window](https://en.wikipedia.org/wiki/Window_function#Hamming_window)
     Hamming,
+    /// Blackman window, stronger sidelobe suppression at the cost of width.
+    ///
+    /// Reference: [Wikipedia: Blackman window](https://en.wikipedia.org/wiki/Window_function#Blackman_window)
     Blackman,
+    /// Rectangular window, no tapering.
+    ///
+    /// Reference: [Wikipedia: Rectangular window](https://en.wikipedia.org/wiki/Window_function#Rectangular_window)
     Rect,
 }
 
+/// Configuration for spectrogram rendering.
 #[derive(Clone, Copy, Debug)]
 pub struct SpectrogramOptions {
     /// FFT size used for each STFT frame.

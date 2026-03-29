@@ -40,6 +40,61 @@ At the end of the day, this may or may not end up working well as a practical mo
 
 ## Quick start
 
+### Live presets
+
+The main live entry points are the scripts under `scripts/`.
+
+Recommended current path:
+
+```bash
+bash scripts/rx_decode_iq_qpsk.sh
+```
+
+That runs:
+- IQ passband mode
+- `fs_baseband = 16000`
+- `nfft = 2048`
+- `ncp = 1024`
+- `sync_half_len = 2048`
+- `QPSK`
+- `Hamming(7,4)` FEC
+- coordinated speaker/mic roundtrip with oracle timing
+
+Other useful presets:
+
+```bash
+bash scripts/rx_decode_simple.sh
+bash scripts/rx_decode_qpsk.sh
+bash scripts/rx_decode_iq.sh
+```
+
+Transmit-only helpers:
+
+```bash
+bash scripts/tx_simple.sh
+bash scripts/tx_qpsk.sh
+bash scripts/tx_iq.sh
+bash scripts/tx_iq_qpsk.sh
+bash scripts/tx_symbols_only.sh
+```
+
+The scripts are stable presets and write their artifacts under `output/`.
+
+Common outputs include:
+- `tx_packet*.wav`
+- `tx_symbols_only*.wav`
+- `tx_roundtrip*.wav`
+- `rx_capture*.wav`
+- `rx_spectrogram*.png`
+- `ofdm_constellation.png`
+- `ofdm_constellation_pre_eq.csv`
+- `ofdm_constellation_post_eq.csv`
+- `ofdm_channel_compare.csv`
+- `ofdm_channel_compare.png`
+- `ofdm_pre_crc_bytes.bin`
+
+For live work, `mic-roundtrip` is the main path. It uses known scheduled burst times and oracle packet expectations; wake/coarse search is not the current focus.
+
 ### WAV commands
 
 Encode payload to WAV:
@@ -113,142 +168,61 @@ Use IQ mode explicitly:
 ```bash
 cargo run -p acoustic_ofdm_cli -- encode \
   --passband-mode iq \
-  --fs-baseband 22050 \
+  --fs-baseband 16000 \
+  --nfft 2048 \
+  --ncp 1024 \
+  --sync-half-len 2048 \
+  --fec-mode hamming74 \
   /tmp/ofdm_iq.wav \
   "hello-ofdm"
 ```
 
 ### Live scripts
 
-The repository root contains convenience scripts with current defaults.
-
-There are two families:
-- `legacy`: current single-rate working baseline
-- `iq`: alternate IQ path with `fs_baseband = 22050`
-
-Transmit repeated BPSK bursts:
-
-```bash
-bash scripts/tx_simple.sh
-```
-
-Transmit repeated BPSK bursts with IQ mode:
-
-```bash
-bash scripts/tx_iq.sh
-```
-
-Transmit repeated QPSK bursts:
-
-```bash
-bash scripts/tx_qpsk.sh
-```
-
-Generate the OFDM body only (first transmission, no wake/calibration):
-
-```bash
-bash scripts/tx_symbols_only.sh
-```
-
-Coordinated speaker/mic roundtrip, BPSK:
-
-```bash
-bash scripts/rx_decode_simple.sh
-```
-
-Coordinated speaker/mic roundtrip, BPSK, IQ mode:
-
-```bash
-bash scripts/rx_decode_iq.sh
-```
-
-Coordinated speaker/mic roundtrip, QPSK:
-
-```bash
-bash scripts/rx_decode_qpsk.sh
-```
-
-Artifacts are written under `output/`, including:
-
-- `tx_packet.wav`
-- `tx_symbols_only.wav`
-- `tx_roundtrip.wav`
-- `rx_capture.wav`
-- `rx_spectrogram.png`
-- `ofdm_constellation.png`
-- `ofdm_constellation_pre_eq.csv`
-- `ofdm_constellation_post_eq.csv`
-- `ofdm_channel_compare.csv`
-- `ofdm_channel_compare.png`
-
-For the current decode-first phase, `mic-roundtrip` is the main live test path.
-It uses known scheduled burst times and only searches a small `sync_off` range.
-
 ### Script usage
 
-The scripts take no positional parameters. They are meant to be stable presets.
-
-- `scripts/tx_simple.sh`
-  - legacy passband mode
-  - BPSK
-  - 8 repeats
-  - writes `output/tx.wav`
+The scripts take no positional parameters. They are intended as checked-in presets.
 
 - `scripts/rx_decode_simple.sh`
-  - legacy passband mode
+  - legacy mode
   - BPSK
-  - one coordinated speaker/mic transmission
-  - writes:
-    - `output/tx_packet.wav`
-    - `output/tx_symbols_only.wav`
-    - `output/tx_roundtrip.wav`
-    - `output/rx_capture.wav`
-    - `output/rx_spectrogram.png`
-    - constellation/channel-comparison artifacts
-  - log file:
-    - `acoustic_ofdm_mic_roundtrip.log`
-
-- `scripts/tx_qpsk.sh`
-  - legacy passband mode
-  - QPSK
-  - writes `output/tx_qpsk.wav`
+  - Hamming FEC
+  - writes `acoustic_ofdm_mic_roundtrip.log`
 
 - `scripts/rx_decode_qpsk.sh`
-  - legacy passband mode
+  - legacy mode
   - QPSK
-  - writes QPSK-specific WAVs and spectrogram
-  - log file:
-    - `acoustic_ofdm_mic_roundtrip_qpsk.log`
-
-- `scripts/tx_symbols_only.sh`
-  - writes only the OFDM body for one packet
-  - no wake, no guard, no calibration
-  - useful for listening to the payload itself
-
-- `scripts/tx_iq.sh`
-  - IQ passband mode
-  - `fs_baseband = 22050`
-  - BPSK
-  - writes `output/tx_iq.wav`
+  - Hamming FEC
+  - writes `acoustic_ofdm_mic_roundtrip_qpsk.log`
 
 - `scripts/rx_decode_iq.sh`
-  - IQ passband mode
-  - `fs_baseband = 22050`
+  - IQ mode
   - BPSK
-  - writes IQ-specific TX/RX WAVs and spectrogram
-  - log file:
-    - `acoustic_ofdm_mic_roundtrip_iq.log`
+  - `fs_baseband = 16000`
+  - `nfft = 2048`
+  - `ncp = 1024`
+  - Hamming FEC
+  - writes `acoustic_ofdm_mic_roundtrip_iq.log`
 
-Recommended workflow:
+- `scripts/rx_decode_iq_qpsk.sh`
+  - IQ mode
+  - QPSK
+  - `fs_baseband = 16000`
+  - `nfft = 2048`
+  - `ncp = 1024`
+  - Hamming FEC
+  - writes `acoustic_ofdm_mic_roundtrip_iq_qpsk.log`
 
-1. Start with the working baseline:
-   - `bash scripts/rx_decode_simple.sh`
-2. Compare against QPSK if needed:
-   - `bash scripts/rx_decode_qpsk.sh`
-3. Compare the alternate passband implementation:
-   - `bash scripts/rx_decode_iq.sh`
+- `scripts/tx_symbols_only.sh`
+  - writes only the OFDM payload body for one packet
+  - no wake, no guard, no calibration
 
-That keeps the baseline and the experimental IQ path separate.
+Recommended order:
+
+1. `bash scripts/rx_decode_simple.sh`
+2. `bash scripts/rx_decode_qpsk.sh`
+3. `bash scripts/rx_decode_iq.sh`
+4. `bash scripts/rx_decode_iq_qpsk.sh`
 
 ### Octave
 

@@ -6,12 +6,12 @@
 
 mod baseband;
 pub mod config;
-pub mod constellation;
 pub mod crc;
 pub mod debug;
-mod eq;
+mod equalizer;
 pub mod modem;
 pub mod packet;
+pub mod plots;
 pub mod spectrogram;
 mod sync;
 mod wake;
@@ -22,7 +22,6 @@ pub use baseband::{
     recover_single_packet_data_symbols,
 };
 pub use config::{EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, WakePreamble};
-pub use constellation::{save_channel_compare_png, save_constellation_comparison_png};
 pub use debug::{
     dump_passband_bins, dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
     dump_passband_constellation, dump_passband_iq_chain, dump_passband_pilot_tracking,
@@ -40,6 +39,7 @@ pub use modem::{
     recover_decided_packet_bytes_passband_with_sync_rate,
 };
 pub use packet::{inspect_packet_bytes, PacketParseAttempt};
+pub use plots::{save_channel_compare_png, save_constellation_comparison_png};
 pub use rustfft::num_complex::Complex32;
 pub use spectrogram::{
     save_spectrogram_png, save_spectrogram_png_with_options, SpectrogramOptions, SpectrogramWindow,

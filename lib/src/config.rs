@@ -1,26 +1,49 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
+/// Constellation mapping used on OFDM data carriers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
+    /// Binary phase-shift keying, one bit per symbol.
     Bpsk,
+    /// Quadrature phase-shift keying, two bits per symbol.
     Qpsk,
 }
 
+/// Strategy used to build the equalizer channel model.
+///
+/// Rationale:
+/// The current receiver separates a static baseline from symbol-local pilot
+/// corrections. This enum controls whether the baseline comes from the training
+/// symbol or starts flat and relies on pilots almost entirely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EqualizerMode {
+    /// Use the training symbol as the baseline channel estimate and refine it
+    /// with pilot-derived residual correction on each data symbol.
     TrainingPilot,
+    /// Start from a flat unit channel and let pilots provide the effective
+    /// correction, avoiding dependence on the training amplitude estimate.
     PilotOnly,
 }
 
+/// Forward-error-correction scheme applied to packet bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FecMode {
+    /// No channel coding.
     None,
+    /// Hamming(7,4) block coding on the serialized packet bitstream.
     Hamming74,
 }
 
+/// Passband implementation used to reach the speaker/microphone path.
+///
+/// Rationale:
+/// `Legacy` keeps the modem at the audio rate, while `Iq` uses a separate
+/// complex-baseband rate with explicit resampling and IQ conversion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PassbandMode {
+    /// Single-rate legacy path with the modem running directly at the audio rate.
     Legacy,
+    /// IQ path with separate baseband/audio rates and explicit resampling.
     Iq,
 }
 
@@ -52,11 +75,16 @@ impl Modulation {
     }
 }
 
+/// Wake-up / preamble family transmitted before the OFDM body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WakePreamble {
+    /// Single tone wake preamble.
     Tone,
+    /// Linear chirp wake preamble.
     Chirp,
+    /// PN-sequence wake preamble.
     Pn,
+    /// Gold-like wake preamble.
     Gold,
 }
 

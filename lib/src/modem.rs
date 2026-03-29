@@ -15,7 +15,8 @@ use crate::debug::{
 };
 use crate::equalizer::{
     decision_directed_evm, equalize_symbol_with_pilots, equalizer_initial_channel,
-    equalizer_refresh_channel, regularized_equalize, rms_evm,
+    equalizer_refresh_channel, equalizer_reset_tracking, regularized_equalize, rms_evm,
+    EqualizerTrackingState,
 };
 use crate::packet::{
     build_packet_bytes, fec_encoded_bits_len, modulation_from_id, split_payload, PacketInfo,
@@ -353,6 +354,8 @@ fn diagnose_passband_window_with_sync_opt(
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = equalizer_initial_channel(cfg, &ytrain, &used_bins, &train_known);
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
     let mut mags = hest.iter().map(|h| h.norm()).collect::<Vec<_>>();
     let mut ytrain_eq = Vec::with_capacity(used_bins.len());
     for (k, &bin) in used_bins.iter().enumerate() {
@@ -380,11 +383,20 @@ fn diagnose_passband_window_with_sync_opt(
         let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             equalizer_refresh_channel(cfg, &mut hest, &y, &used_bins, &train_known);
+            equalizer_reset_tracking(&mut eq_state);
             mags.extend(hest.iter().map(|h| h.norm()));
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(
+            cfg,
+            &mut eq_state,
+            &y,
+            &used_bins,
+            &pilot_bins,
+            &pref,
+            &hest,
+        );
         if !pilot_bins.is_empty() {
             for (k, pbin) in pilot_bins.iter().enumerate() {
                 if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
@@ -472,6 +484,8 @@ pub(crate) fn dump_passband_constellation_impl(
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = equalizer_initial_channel(cfg, &ytrain, &used_bins, &train_known);
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
 
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
@@ -492,10 +506,19 @@ pub(crate) fn dump_passband_constellation_impl(
         let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             equalizer_refresh_channel(cfg, &mut hest, &y, &used_bins, &train_known);
+            equalizer_reset_tracking(&mut eq_state);
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(
+            cfg,
+            &mut eq_state,
+            &y,
+            &used_bins,
+            &pilot_bins,
+            &pref,
+            &hest,
+        );
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
                 pre_eq.push(y[*dbin]);
@@ -550,6 +573,8 @@ pub(crate) fn dump_passband_pilot_tracking_impl(
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = equalizer_initial_channel(cfg, &ytrain, &used_bins, &train_known);
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
 
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
@@ -573,13 +598,22 @@ pub(crate) fn dump_passband_pilot_tracking_impl(
         let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             equalizer_refresh_channel(cfg, &mut hest, &y, &used_bins, &train_known);
+            equalizer_reset_tracking(&mut eq_state);
             let mags = hest.iter().map(|h| h.norm()).collect::<Vec<_>>();
             hest_mag_mean.push(mags.iter().sum::<f32>() / (mags.len() as f32));
             hest_mag_max.push(mags.iter().copied().fold(0.0f32, f32::max));
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(
+            cfg,
+            &mut eq_state,
+            &y,
+            &used_bins,
+            &pilot_bins,
+            &pref,
+            &hest,
+        );
         let phase = pilot_phase_error(&xeq_used, &used_bins, &pilot_bins, &pref).unwrap_or(0.0);
         let mut pilot_eq_pre = Vec::new();
         let mut pilot_ref = Vec::new();
@@ -663,6 +697,8 @@ fn dump_passband_bins_with_sync_opt(
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = equalizer_initial_channel(cfg, &ytrain, &used_bins, &train_known);
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
 
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
@@ -682,10 +718,19 @@ fn dump_passband_bins_with_sync_opt(
         let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             equalizer_refresh_channel(cfg, &mut hest, &y, &used_bins, &train_known);
+            equalizer_reset_tracking(&mut eq_state);
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(
+            cfg,
+            &mut eq_state,
+            &y,
+            &used_bins,
+            &pilot_bins,
+            &pref,
+            &hest,
+        );
         let mut pre_eq_used = Vec::with_capacity(used_bins.len());
         let mut post_eq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
@@ -761,6 +806,8 @@ pub(crate) fn dump_passband_channel_compare_with_sync_impl(
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = equalizer_initial_channel(cfg, &ytrain, &used_bins, &train_known);
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
 
     let data_start = xsync_len + train_len;
     let sym_len = cfg.nfft + cfg.ncp;
@@ -781,10 +828,19 @@ pub(crate) fn dump_passband_channel_compare_with_sync_impl(
         let x = fft(&xbb[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             equalizer_refresh_channel(cfg, &mut hest, &y, &used_bins, &train_known);
+            equalizer_reset_tracking(&mut eq_state);
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(
+            cfg,
+            &mut eq_state,
+            &y,
+            &used_bins,
+            &pilot_bins,
+            &pref,
+            &hest,
+        );
         let mut phase_by_bin = vec![0.0f32; used_bins.len()];
         if !pilot_bins.is_empty() && !pref.is_empty() {
             let mut pilot_phase_pts = Vec::<(f32, f32)>::new();
@@ -914,9 +970,13 @@ pub(crate) fn dump_passband_iq_chain_impl(
         PassbandMode::Legacy => down_audio.clone(),
         PassbandMode::Iq => resample_complex_linear_rate(&down_audio, cfg.fs, cfg.fs_baseband),
     };
+    let pre_baseband = match cfg.passband_mode {
+        PassbandMode::Legacy => pre,
+        PassbandMode::Iq => ((pre as f32) * (cfg.fs_baseband / cfg.fs)).round() as usize,
+    };
     Some(PassbandIqChainDump {
         downconverted_audio_rate: down_audio[pre..].to_vec(),
-        baseband_rate: baseband[pre.min(baseband.len())..].to_vec(),
+        baseband_rate: baseband[pre_baseband.min(baseband.len())..].to_vec(),
         fs_audio: cfg.fs,
         fs_baseband: active_baseband_fs(cfg),
     })

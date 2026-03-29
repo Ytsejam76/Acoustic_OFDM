@@ -4,7 +4,10 @@ use rustfft::num_complex::Complex32;
 
 use crate::baseband::{fft, known_pilot_symbols, known_training_symbols, ofdm_bin_plan};
 use crate::config::OfdmConfig;
-use crate::equalizer::{equalize_symbol_with_pilots, regularized_equalize, rms_evm};
+use crate::equalizer::{
+    equalize_symbol_with_pilots, equalizer_reset_tracking, regularized_equalize, rms_evm,
+    EqualizerTrackingState,
+};
 
 /// Returns the active DSP sample rate seen by the modem.
 ///
@@ -196,6 +199,8 @@ pub(crate) fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig,
     let ytrain = fft(train_no_cp);
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
     let mut ytrain_eq = Vec::with_capacity(used_bins.len());
     let mut hmag_sum = 0.0f32;
     for (k, &bin) in used_bins.iter().enumerate() {
@@ -215,8 +220,15 @@ pub(crate) fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig,
         if s1 <= rbb_cfo.len() {
             let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
             let pref = known_pilot_symbols(pilot_bins.len(), 1);
-            let xeq_used =
-                equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+            let xeq_used = equalize_symbol_with_pilots(
+                cfg,
+                &mut eq_state,
+                &y,
+                &used_bins,
+                &pilot_bins,
+                &pref,
+                &hest,
+            );
             let mut pilot_eq = Vec::new();
             let mut pilot_ref = Vec::new();
             for (k, pbin) in pilot_bins.iter().enumerate() {

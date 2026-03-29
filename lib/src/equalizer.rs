@@ -1,8 +1,28 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
+use std::collections::VecDeque;
+
 use rustfft::num_complex::Complex32;
 
 use crate::config::{EqualizerFeatures, Modulation, OfdmConfig};
+
+/// Packet-local equalizer tracking state.
+///
+/// Rationale:
+/// The equalizer keeps a short history of pilot-derived phase-line parameters
+/// and pilot residual variance. This supports temporal least-squares tracking
+/// and MMSE regularization without contaminating the static training baseline.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EqualizerTrackingState {
+    phase_line_hist: VecDeque<(f32, f32, f32)>,
+    next_symbol_time: f32,
+    noise_var: Option<f32>,
+}
+
+/// Resets packet-local pilot tracking.
+pub(crate) fn equalizer_reset_tracking(state: &mut EqualizerTrackingState) {
+    *state = EqualizerTrackingState::default();
+}
 
 /// Estimates the training-symbol channel on the active carriers.
 ///
@@ -98,6 +118,30 @@ pub(crate) fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
     y * g
 }
 
+/// Applies a noise-aware MMSE single-bin equalizer.
+///
+/// Rationale:
+/// Once pilot residuals provide a noise-power estimate
+/// $$
+/// \sigma_n^2 \approx \mathbb{E}[|\hat X_{\text{pilot}}-X_{\text{pilot}}|^2],
+/// $$
+/// the equalizer can use the corresponding MMSE inverse
+/// $$
+/// G[k] = \frac{\hat H^*[k]}{|\hat H[k]|^2 + \sigma_n^2}
+/// $$
+/// rather than the legacy heuristic regularizer.
+fn regularized_equalize_mmse(y: Complex32, h: Complex32, noise_var: f32) -> Complex32 {
+    let h_pow = h.norm_sqr();
+    let eps = noise_var.clamp(1.0e-4, 2.5e-1);
+    let mut g = h.conj() / (h_pow + eps);
+    let gmax = 2.0f32;
+    let gnorm = g.norm();
+    if gnorm > gmax && gnorm.is_finite() {
+        g *= gmax / gnorm;
+    }
+    y * g
+}
+
 /// Equalizes one OFDM symbol against a baseline channel model.
 ///
 /// Rationale:
@@ -107,6 +151,8 @@ pub(crate) fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
 ///
 /// and invert that baseline before applying any pilot-derived residual.
 fn equalize_symbol_with_baseline(
+    cfg: &OfdmConfig,
+    state: &EqualizerTrackingState,
     y: &[Complex32],
     used_bins: &[usize],
     hest: &[Complex32],
@@ -115,12 +161,25 @@ fn equalize_symbol_with_baseline(
     let mut xeq_used = Vec::with_capacity(used_bins.len());
     for (k, &bin) in used_bins.iter().enumerate() {
         let h0 = Complex32::from_polar(amp0[k], phase0[k]);
-        xeq_used.push(regularized_equalize(y[bin], h0));
+        let z = if cfg
+            .equalizer
+            .features
+            .contains(EqualizerFeatures::NOISE_AWARE_MMSE)
+        {
+            if let Some(noise_var) = state.noise_var {
+                regularized_equalize_mmse(y[bin], h0, noise_var)
+            } else {
+                regularized_equalize(y[bin], h0)
+            }
+        } else {
+            regularized_equalize(y[bin], h0)
+        };
+        xeq_used.push(z);
     }
     xeq_used
 }
 
-/// Equalizes one OFDM symbol and applies pilot-derived residual correction.
+/// Equalizes one OFDM symbol with the current instantaneous pilot model.
 ///
 /// Rationale:
 /// The training symbol gives the static baseline amplitude/phase model, while
@@ -134,8 +193,9 @@ fn equalize_symbol_with_baseline(
 /// $$\Delta A(k) = c + d k$$
 ///
 /// and applies both before a final common pilot normalization.
-pub(crate) fn equalize_symbol_with_pilots(
+fn equalize_symbol_with_pilots_instantaneous(
     cfg: &OfdmConfig,
+    state: &EqualizerTrackingState,
     y: &[Complex32],
     used_bins: &[usize],
     pilot_bins: &[usize],
@@ -146,7 +206,7 @@ pub(crate) fn equalize_symbol_with_pilots(
         return Vec::new();
     }
 
-    let mut xeq_used = equalize_symbol_with_baseline(y, used_bins, hest);
+    let mut xeq_used = equalize_symbol_with_baseline(cfg, state, y, used_bins, hest);
 
     if cfg
         .equalizer
@@ -227,6 +287,196 @@ pub(crate) fn equalize_symbol_with_pilots(
         }
     }
     xeq_used
+}
+
+/// Equalizes one OFDM symbol and applies pilot-derived residual correction.
+///
+/// Rationale:
+/// The working instantaneous path is kept intact as a fallback because it is a
+/// known-good operating mode. When temporal least-squares tracking is enabled,
+/// only the low-dimensional pilot phase-line parameters are tracked over time;
+/// all other stages remain local to the current symbol.
+pub(crate) fn equalize_symbol_with_pilots(
+    cfg: &OfdmConfig,
+    state: &mut EqualizerTrackingState,
+    y: &[Complex32],
+    used_bins: &[usize],
+    pilot_bins: &[usize],
+    pref: &[Complex32],
+    hest: &[Complex32],
+) -> Vec<Complex32> {
+    if !cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::TEMPORAL_LS)
+    {
+        let xeq_used = equalize_symbol_with_pilots_instantaneous(
+            cfg, state, y, used_bins, pilot_bins, pref, hest,
+        );
+        update_noise_variance(state, &xeq_used, used_bins, pilot_bins, pref);
+        return xeq_used;
+    }
+
+    if used_bins.is_empty() || hest.len() != used_bins.len() {
+        return Vec::new();
+    }
+
+    let mut xeq_used = equalize_symbol_with_baseline(cfg, state, y, used_bins, hest);
+
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::PILOT_PHASE)
+        && !pilot_bins.is_empty()
+        && !pref.is_empty()
+    {
+        let mut pilot_phase_pts = Vec::<(f32, f32, f32)>::new();
+        for (k, pbin) in pilot_bins.iter().enumerate() {
+            if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                let ref_sym = pref[k];
+                if ref_sym.norm_sqr() > 1.0e-9 {
+                    let residual = xeq_used[pos] * ref_sym.conj();
+                    pilot_phase_pts.push((
+                        *pbin as f32,
+                        residual.arg(),
+                        pilot_weight(xeq_used[pos], ref_sym, cfg),
+                    ));
+                }
+            }
+        }
+        if pilot_phase_pts.len() >= 2 {
+            unwrap_phase_points(&mut pilot_phase_pts);
+            if let Some(current_line) = fit_phase_line(&pilot_phase_pts) {
+                let phase_line = temporal_phase_line_fit(cfg, state, current_line);
+                for (k, &bin) in used_bins.iter().enumerate() {
+                    let ph = phase_line.0 + phase_line.1 * (bin as f32);
+                    xeq_used[k] *= Complex32::from_polar(1.0, -ph);
+                }
+            }
+        }
+    }
+
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::PILOT_AMPLITUDE)
+        && !pilot_bins.is_empty()
+        && !pref.is_empty()
+    {
+        let mut pilot_amp_pts = Vec::<(f32, f32, f32)>::new();
+        for (k, pbin) in pilot_bins.iter().enumerate() {
+            if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                let ref_sym = pref[k];
+                let ref_mag = ref_sym.norm();
+                if ref_mag > 1.0e-6 {
+                    let gain = (xeq_used[pos].norm() / ref_mag).clamp(0.5, 2.0);
+                    pilot_amp_pts.push((
+                        *pbin as f32,
+                        gain,
+                        pilot_weight(xeq_used[pos], ref_sym, cfg),
+                    ));
+                }
+            }
+        }
+        if let Some((intercept, slope)) = fit_real_line(&pilot_amp_pts) {
+            for (k, &bin) in used_bins.iter().enumerate() {
+                let amp = (intercept + slope * (bin as f32)).clamp(0.5, 2.0);
+                xeq_used[k] /= amp;
+            }
+        }
+    }
+
+    let mut num = Complex32::new(0.0, 0.0);
+    let mut den = 0.0f32;
+    for (k, pbin) in pilot_bins.iter().enumerate() {
+        if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+            num += xeq_used[pos] * pref[k].conj();
+            den += pref[k].norm_sqr();
+        }
+    }
+    if den > 1.0e-9 {
+        let g = num / den;
+        if g.norm() > 1.0e-6 && g.re.is_finite() && g.im.is_finite() {
+            for z in &mut xeq_used {
+                *z /= g;
+            }
+        }
+    }
+
+    update_noise_variance(state, &xeq_used, used_bins, pilot_bins, pref);
+    xeq_used
+}
+
+fn temporal_phase_line_fit(
+    cfg: &OfdmConfig,
+    state: &mut EqualizerTrackingState,
+    current: (f32, f32),
+) -> (f32, f32) {
+    let current_time = state.next_symbol_time;
+    let intercept = if let Some((_, prev_i, _)) = state.phase_line_hist.back() {
+        normalize_angle_near(current.0, *prev_i)
+    } else {
+        current.0
+    };
+    state
+        .phase_line_hist
+        .push_back((current_time, intercept, current.1));
+    state.next_symbol_time += 1.0;
+
+    let keep = cfg.equalizer.temporal_window.max(1);
+    while state.phase_line_hist.len() > keep {
+        state.phase_line_hist.pop_front();
+    }
+
+    if state.phase_line_hist.len() < 2 {
+        return (intercept, current.1);
+    }
+
+    let mut intercept_pts = Vec::with_capacity(state.phase_line_hist.len());
+    let mut slope_pts = Vec::with_capacity(state.phase_line_hist.len());
+    for &(t, a, b) in &state.phase_line_hist {
+        intercept_pts.push((t, a, 1.0));
+        slope_pts.push((t, b, 1.0));
+    }
+    let fit_a = fit_real_line(&intercept_pts).map(|(c0, c1)| c0 + c1 * current_time);
+    let fit_b = fit_real_line(&slope_pts).map(|(d0, d1)| d0 + d1 * current_time);
+    match (fit_a, fit_b) {
+        (Some(a), Some(b)) => (a, b),
+        _ => (intercept, current.1),
+    }
+}
+
+fn update_noise_variance(
+    state: &mut EqualizerTrackingState,
+    xeq_used: &[Complex32],
+    used_bins: &[usize],
+    pilot_bins: &[usize],
+    pref: &[Complex32],
+) {
+    if pilot_bins.is_empty() || pref.is_empty() {
+        return;
+    }
+    let mut err_sum = 0.0f32;
+    let mut count = 0usize;
+    for (k, pbin) in pilot_bins.iter().enumerate() {
+        if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+            err_sum += (xeq_used[pos] - pref[k]).norm_sqr();
+            count += 1;
+        }
+    }
+    if count > 0 {
+        state.noise_var = Some((err_sum / count as f32).clamp(1.0e-4, 2.5e-1));
+    }
+}
+
+fn normalize_angle_near(mut value: f32, reference: f32) -> f32 {
+    while value - reference > std::f32::consts::PI {
+        value -= 2.0 * std::f32::consts::PI;
+    }
+    while value - reference < -std::f32::consts::PI {
+        value += 2.0 * std::f32::consts::PI;
+    }
+    value
 }
 
 /// Builds a smooth baseline channel model from the training estimate.

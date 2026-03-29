@@ -5,6 +5,7 @@ use rustfft::{num_complex::Complex32, FftPlanner};
 use crate::config::{Modulation, OfdmConfig, PassbandMode};
 use crate::equalizer::{
     equalize_symbol_with_pilots, equalizer_initial_channel, equalizer_refresh_channel,
+    equalizer_reset_tracking, EqualizerTrackingState,
 };
 use crate::packet::{
     bits_to_bytes, build_packet_bytes, bytes_to_bits, fec_decode_bits, fec_encode_bits,
@@ -121,6 +122,8 @@ fn equalized_data_symbols_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Optio
 
     let train_known = known_training_symbols(used_bins.len(), cfg.modulation);
     let mut hest = equalizer_initial_channel(cfg, &ytrain, &used_bins, &train_known);
+    let mut eq_state = EqualizerTrackingState::default();
+    equalizer_reset_tracking(&mut eq_state);
 
     let data_start = xsync_len + train_len;
     let max_payload_bytes = cfg.packet_payload_bytes + 16;
@@ -139,10 +142,19 @@ fn equalized_data_symbols_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Optio
         let y = fft(&rbb[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
         if kind == PacketSymbolKind::Training {
             equalizer_refresh_channel(cfg, &mut hest, &y, &used_bins, &train_known);
+            equalizer_reset_tracking(&mut eq_state);
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(
+            cfg,
+            &mut eq_state,
+            &y,
+            &used_bins,
+            &pilot_bins,
+            &pref,
+            &hest,
+        );
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
                 rx_syms.push(xeq_used[pos]);

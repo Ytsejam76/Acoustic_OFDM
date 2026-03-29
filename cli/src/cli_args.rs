@@ -30,6 +30,7 @@ pub(crate) enum ModulationArg {
 pub(crate) enum EqualizerModeArg {
     TrainingPilot,
     PilotOnly,
+    TemporalLs,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -90,10 +91,20 @@ impl From<EqualizerModeArg> for EqualizerConfig {
                 .training_baseline()
                 .pilot_phase()
                 .pilot_amplitude()
+                .weighted_pilots()
                 .build(),
             EqualizerModeArg::PilotOnly => EqualizerConfig::builder()
                 .pilot_phase()
                 .pilot_amplitude()
+                .weighted_pilots()
+                .build(),
+            EqualizerModeArg::TemporalLs => EqualizerConfig::builder()
+                .training_baseline()
+                .pilot_phase()
+                .pilot_amplitude()
+                .weighted_pilots()
+                .noise_aware_mmse()
+                .temporal_ls(3)
                 .build(),
         }
     }

@@ -12,10 +12,10 @@ exec cargo run -p acoustic_ofdm_cli -- \
   --profile live-debug \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 16000 \
-  --nfft 2048 \
-  --ncp 1024 \
-  --sync-half-len 2048 \
+  --fs-baseband 22050 \
+  --nfft 1024 \
+  --ncp 512 \
+  --sync-half-len 1024 \
   --modulation qpsk \
   --spk-gain 0.6 \
   --oracle \

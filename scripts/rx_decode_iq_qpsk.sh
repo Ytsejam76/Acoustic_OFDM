@@ -29,10 +29,10 @@ cargo run -p acoustic_ofdm_cli -- \
   encode \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 16000 \
-  --nfft 2048 \
-  --ncp 1024 \
-  --sync-half-len 2048 \
+  --fs-baseband 22050 \
+  --nfft 1024 \
+  --ncp 512 \
+  --sync-half-len 1024 \
   --modulation qpsk \
   "$OUT_DIR/tx_packet_iq_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
@@ -41,10 +41,10 @@ cargo run -p acoustic_ofdm_cli -- \
   encode-body \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 16000 \
-  --nfft 2048 \
-  --ncp 1024 \
-  --sync-half-len 2048 \
+  --fs-baseband 22050 \
+  --nfft 1024 \
+  --ncp 512 \
+  --sync-half-len 1024 \
   --modulation qpsk \
   "$OUT_DIR/tx_symbols_only_iq_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
@@ -54,10 +54,10 @@ exec cargo run -p acoustic_ofdm_cli -- \
   --profile live-debug \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 16000 \
-  --nfft 2048 \
-  --ncp 1024 \
-  --sync-half-len 2048 \
+  --fs-baseband 22050 \
+  --nfft 1024 \
+  --ncp 512 \
+  --sync-half-len 1024 \
   --modulation qpsk \
   --duration-sec "$DURATION" \
   --mic-gain 0.6 \

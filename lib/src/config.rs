@@ -38,6 +38,10 @@ impl EqualizerFeatures {
     pub const PILOT_AMPLITUDE: Self = Self(1 << 2);
     /// Weight pilot observations by reliability when fitting corrections.
     pub const WEIGHTED_PILOTS: Self = Self(1 << 3);
+    /// Use a noise-aware MMSE-style inverse instead of the legacy heuristic one.
+    pub const NOISE_AWARE_MMSE: Self = Self(1 << 4);
+    /// Use temporal least-squares tracking on pilot-derived phase-line parameters.
+    pub const TEMPORAL_LS: Self = Self(1 << 5);
 
     /// Returns whether all requested feature bits are enabled.
     pub fn contains(self, other: Self) -> bool {
@@ -60,10 +64,12 @@ impl std::ops::BitOrAssign for EqualizerFeatures {
 }
 
 /// Equalizer subsystem configuration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EqualizerConfig {
     /// Enabled equalizer stages.
     pub features: EqualizerFeatures,
+    /// Number of recent symbols used by temporal least-squares tracking.
+    pub temporal_window: usize,
 }
 
 impl EqualizerConfig {
@@ -79,6 +85,7 @@ impl Default for EqualizerConfig {
             .training_baseline()
             .pilot_phase()
             .pilot_amplitude()
+            .weighted_pilots()
             .build()
     }
 }
@@ -91,6 +98,7 @@ impl Default for EqualizerConfig {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EqualizerBuilder {
     features: EqualizerFeatures,
+    temporal_window: usize,
 }
 
 impl EqualizerBuilder {
@@ -118,10 +126,24 @@ impl EqualizerBuilder {
         self
     }
 
+    /// Enable noise-aware MMSE regularization in the baseline equalizer.
+    pub fn noise_aware_mmse(mut self) -> Self {
+        self.features |= EqualizerFeatures::NOISE_AWARE_MMSE;
+        self
+    }
+
+    /// Enable temporal least-squares tracking over the last `window` symbols.
+    pub fn temporal_ls(mut self, window: usize) -> Self {
+        self.features |= EqualizerFeatures::TEMPORAL_LS;
+        self.temporal_window = window.max(1);
+        self
+    }
+
     /// Finalize the equalizer configuration.
     pub fn build(self) -> EqualizerConfig {
         EqualizerConfig {
             features: self.features,
+            temporal_window: self.temporal_window.max(1),
         }
     }
 }

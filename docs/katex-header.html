@@ -1,0 +1,36 @@
+<!-- KaTeX support for rustdoc-rendered equations written in LaTeX delimiters. -->
+<link
+  rel="stylesheet"
+  href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+  integrity="sha384-n8MVd4RsNIU0M9hFf6A5hJvVQ1BM8DT6vKrrf5gkP7FpC18JNpDutVdGs14Q6gtt"
+  crossorigin="anonymous"
+>
+<script
+  defer
+  src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+  integrity="sha384-7zkQWj6vbA6QbaO5jM90+hCbGyF/F7fsV3Gzdh0dX8GZFODdgNpTi27C/medfyqC"
+  crossorigin="anonymous"
+></script>
+<script
+  defer
+  src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  integrity="sha384-hCXGrW6Pitjv3Wj4fcAclW713N4QeZyjdrg0dp2PbgM3N3aR6Vrn956xWxBY2NUg"
+  crossorigin="anonymous"
+></script>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    if (typeof renderMathInElement !== "function") {
+      return;
+    }
+    renderMathInElement(document.body, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "\\[", right: "\\]", display: true },
+        { left: "$", right: "$", display: false }
+      ],
+      throwOnError: false
+    });
+  });
+</script>
+

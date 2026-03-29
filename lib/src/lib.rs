@@ -1,5 +1,9 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
+//! Acoustic OFDM modem library.
+//!
+//! This crate exposes the modem, debug, and packet layers used by the CLI.
+
 mod baseband;
 pub mod config;
 pub mod constellation;
@@ -10,8 +14,8 @@ pub mod modem;
 pub mod packet;
 pub mod spectrogram;
 mod sync;
-pub mod wav_io;
 mod wake;
+pub mod wav_io;
 
 pub use baseband::{
     decode_packet_baseband, encode_single_packet_baseband, expected_single_packet_data_symbols,

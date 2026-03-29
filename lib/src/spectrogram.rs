@@ -16,8 +16,11 @@ pub enum SpectrogramWindow {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SpectrogramOptions {
+    /// FFT size used for each STFT frame.
     pub nfft: usize,
+    /// Hop size, in samples, between adjacent STFT frames.
     pub hop: usize,
+    /// Analysis window applied before each FFT.
     pub window: SpectrogramWindow,
 }
 

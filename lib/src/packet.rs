@@ -5,11 +5,17 @@ use crate::crc::crc16_ccitt;
 
 #[derive(Clone, Debug)]
 pub struct PacketInfo {
+    /// Packet format version from the serialized header.
     pub version: u8,
+    /// On-wire modulation identifier from the packet header.
     pub mod_id: u8,
+    /// Session identifier used to group fragments from the same transmission.
     pub session_id: u16,
+    /// Zero-based fragment index within the session payload.
     pub frag_index: u8,
+    /// Total number of fragments in the session payload.
     pub frag_count: u8,
+    /// Application payload bytes carried by this fragment.
     pub payload: Vec<u8>,
 }
 
@@ -91,12 +97,19 @@ pub fn parse_packet_bytes(rx: &[u8]) -> Option<(PacketInfo, usize)> {
 
 #[derive(Clone, Debug)]
 pub struct PacketParseAttempt {
+    /// Whether the leading sync/preamble bytes matched `0xA5 0x5A`.
     pub preamble_ok: bool,
+    /// Whether enough bytes were available to read the fixed-size header.
     pub enough_for_header: bool,
+    /// Parsed payload length from the header when available.
     pub payload_len: Option<usize>,
+    /// Total packet length implied by the header when available.
     pub total_len: Option<usize>,
+    /// Whether the received byte stream was long enough for the full packet.
     pub enough_for_total: bool,
+    /// Whether the packet CRC matched.
     pub crc_ok: bool,
+    /// Fully parsed packet when both header and CRC checks succeeded.
     pub parsed: Option<PacketInfo>,
 }
 

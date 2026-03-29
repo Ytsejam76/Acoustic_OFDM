@@ -3,11 +3,16 @@
 use rustfft::num_complex::Complex32;
 
 use crate::baseband::{
-    decode_packet_info_baseband, fft, known_pilot_symbols, known_training_symbols,
-    ofdm_bin_plan, packet_symbol_plan, recover_decided_packet_bytes_baseband,
-    tx_one_packet_baseband, PacketSymbolKind,
+    decode_packet_info_baseband, fft, known_pilot_symbols, known_training_symbols, ofdm_bin_plan,
+    packet_symbol_plan, recover_decided_packet_bytes_baseband, tx_one_packet_baseband,
+    PacketSymbolKind,
 };
 use crate::config::{OfdmConfig, PassbandMode};
+use crate::debug::{
+    EncodedBurst, EncodedPacketMeta, PassbandBinDump, PassbandBinDumpRow,
+    PassbandChannelCompareDump, PassbandChannelCompareRow, PassbandConstellationDump,
+    PassbandDiagnostics, PassbandIqChainDump, PassbandPilotTrackDump, PassbandSyncDump,
+};
 use crate::eq::{
     decision_directed_evm, equalize_symbol_with_pilots, equalizer_initial_channel,
     equalizer_refresh_channel, regularized_equalize, rms_evm,
@@ -21,102 +26,6 @@ use crate::sync::{
     resample_from_offset, resample_from_offset_rate, sample_complex_linear,
 };
 use crate::wake::make_wake_tone;
-
-#[derive(Clone, Debug)]
-pub struct EncodedPacketMeta {
-    pub frag_index: usize,
-    pub frag_count: usize,
-    pub packet_start: usize,
-    pub packet_len: usize,
-    pub xbb: Vec<Complex32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct EncodedBurst {
-    pub audio: Vec<f32>,
-    pub packet_meta: Vec<EncodedPacketMeta>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandDiagnostics {
-    pub enough_samples: bool,
-    pub sync_off: usize,
-    pub cfo_hz: f32,
-    pub sync_rms: f32,
-    pub sync_peak: f32,
-    pub post_rms: f32,
-    pub post_peak: f32,
-    pub train_rms: f32,
-    pub hest_mag_min: f32,
-    pub hest_mag_mean: f32,
-    pub hest_mag_max: f32,
-    pub train_recon_evm: f32,
-    pub pilot_residual_evm: f32,
-    pub pilot_post_evm: f32,
-    pub post_eq_evm: f32,
-    pub decoded: bool,
-    pub decoded_payload_len: Option<usize>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandConstellationDump {
-    pub pre_eq: Vec<Complex32>,
-    pub post_eq: Vec<Complex32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandPilotTrackDump {
-    pub pilot_phase_rad: Vec<f32>,
-    pub pilot_evm_pre: Vec<f32>,
-    pub pilot_evm_post: Vec<f32>,
-    pub hest_mag_mean: Vec<f32>,
-    pub hest_mag_max: Vec<f32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandBinDumpRow {
-    pub data_symbol_idx: usize,
-    pub used_bin: usize,
-    pub role: &'static str,
-    pub pre_eq: Complex32,
-    pub post_eq: Complex32,
-    pub reference: Option<Complex32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandBinDump {
-    pub rows: Vec<PassbandBinDumpRow>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandChannelCompareRow {
-    pub data_symbol_idx: usize,
-    pub used_bin: usize,
-    pub role: &'static str,
-    pub actual_h: Complex32,
-    pub estimated_h_train: Complex32,
-    pub estimated_h_pilot: Complex32,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandChannelCompareDump {
-    pub rows: Vec<PassbandChannelCompareRow>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandSyncDump {
-    pub coarse_sync_off: usize,
-    pub refined_sync_off: usize,
-    pub metrics: Vec<f32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PassbandIqChainDump {
-    pub downconverted_audio_rate: Vec<Complex32>,
-    pub baseband_rate: Vec<Complex32>,
-    pub fs_audio: f32,
-    pub fs_baseband: f32,
-}
 
 fn pilot_phase_error(
     xeq_used: &[Complex32],
@@ -284,7 +193,8 @@ pub fn decode_single_packet_passband_with_sync_rate(
     sync_off: f32,
     time_scale: f32,
 ) -> Option<Vec<u8>> {
-    decode_packet_from_passband_with_sync_rate(pkt_audio, cfg, sync_off, time_scale).map(|p| p.payload)
+    decode_packet_from_passband_with_sync_rate(pkt_audio, cfg, sync_off, time_scale)
+        .map(|p| p.payload)
 }
 
 pub fn recover_decided_packet_bytes_passband_with_sync(
@@ -390,8 +300,8 @@ fn diagnose_passband_window_with_sync_opt(
     let rbb_full = downconvert_passband(&chunk, cfg);
     let rbb = &rbb_full[pre..];
     let coarse_sync_off = find_repeated_half_sync_offset(rbb, cfg);
-    let (sync_off, time_scale) = forced_sync
-        .unwrap_or_else(|| (refine_sync_offset(rbb, cfg, coarse_sync_off), 1.0));
+    let (sync_off, time_scale) =
+        forced_sync.unwrap_or_else(|| (refine_sync_offset(rbb, cfg, coarse_sync_off), 1.0));
     let rbb_sync = resample_from_offset_rate(rbb, sync_off, time_scale);
     let cfo_hz = estimate_coarse_cfo_hz(&rbb_sync, cfg);
     let rbb_cfo = coarse_cfo_correct(&rbb_sync, cfg);
@@ -527,7 +437,7 @@ fn diagnose_passband_window_with_sync_opt(
 /// - `cfg`: modem configuration.
 /// Returns:
 /// - `Option<PassbandConstellationDump>`: constellation samples when extraction succeeds.
-pub fn dump_passband_constellation(
+pub(crate) fn dump_passband_constellation_impl(
     pkt_audio: &[f32],
     cfg: &OfdmConfig,
     sync_off: f32,
@@ -598,7 +508,7 @@ pub fn dump_passband_constellation(
     Some(PassbandConstellationDump { pre_eq, post_eq })
 }
 
-pub fn dump_passband_pilot_tracking(
+pub(crate) fn dump_passband_pilot_tracking_impl(
     pkt_audio: &[f32],
     cfg: &OfdmConfig,
 ) -> Option<PassbandPilotTrackDump> {
@@ -701,11 +611,14 @@ pub fn dump_passband_pilot_tracking(
     })
 }
 
-pub fn dump_passband_bins(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandBinDump> {
+pub(crate) fn dump_passband_bins_impl(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+) -> Option<PassbandBinDump> {
     dump_passband_bins_with_sync_opt(pkt_audio, cfg, None)
 }
 
-pub fn dump_passband_bins_with_sync(
+pub(crate) fn dump_passband_bins_with_sync_impl(
     pkt_audio: &[f32],
     cfg: &OfdmConfig,
     sync_off: f32,
@@ -808,7 +721,7 @@ fn dump_passband_bins_with_sync_opt(
     Some(PassbandBinDump { rows })
 }
 
-pub fn dump_passband_channel_compare_with_sync(
+pub(crate) fn dump_passband_channel_compare_with_sync_impl(
     payload: &[u8],
     pkt_audio: &[f32],
     cfg: &OfdmConfig,
@@ -956,7 +869,10 @@ pub fn dump_passband_channel_compare_with_sync(
 /// - `cfg`: modem configuration.
 /// Returns:
 /// - `Option<PassbandSyncDump>`: sync metric samples and chosen offsets.
-pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandSyncDump> {
+pub(crate) fn dump_passband_sync_metric_impl(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+) -> Option<PassbandSyncDump> {
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {
@@ -979,7 +895,10 @@ pub fn dump_passband_sync_metric(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<
     })
 }
 
-pub fn dump_passband_iq_chain(pkt_audio: &[f32], cfg: &OfdmConfig) -> Option<PassbandIqChainDump> {
+pub(crate) fn dump_passband_iq_chain_impl(
+    pkt_audio: &[f32],
+    cfg: &OfdmConfig,
+) -> Option<PassbandIqChainDump> {
     let wake_len = (cfg.wake_ms * 1e-3 * cfg.fs) as usize;
     let guard_len = (cfg.wake_guard_ms * 1e-3 * cfg.fs) as usize;
     if pkt_audio.len() <= wake_len + guard_len + cfg.nfft + cfg.ncp {

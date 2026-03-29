@@ -95,31 +95,57 @@ impl WakePreamble {
 
 #[derive(Clone, Debug)]
 pub struct OfdmConfig {
+    /// Audio-side sample rate in hertz.
     pub fs: f32,
+    /// Complex-baseband sample rate in hertz before IQ up/downsampling.
     pub fs_baseband: f32,
+    /// Passband carrier frequency in hertz.
     pub fc: f32,
+    /// Additional payload/body gain applied before final packet shaping.
     pub payload_gain: f32,
+    /// IFFT/FFT size for OFDM symbols.
     pub nfft: usize,
+    /// Cyclic-prefix length in samples at the active baseband rate.
     pub ncp: usize,
+    /// Optional explicit baseband frequency origin override.
     pub base_freq_hz: Option<f32>,
+    /// Active FFT-bin indices used by the modem.
     pub used_bins: Vec<usize>,
+    /// Active FFT-bin indices reserved for pilots.
     pub pilot_bins: Vec<usize>,
+    /// Optional legacy pilot-count override kept for compatibility.
     pub num_pilots: Option<usize>,
+    /// Optional legacy pilot enable flag kept for compatibility.
     pub use_pilots: Option<bool>,
+    /// Optional periodic retraining interval in data symbols.
     pub retrain_interval_data_symbols: Option<usize>,
+    /// Whether to append a terminal training symbol at the end of the packet.
     pub terminal_training_symbol: bool,
+    /// Data modulation used on the active data carriers.
     pub modulation: Modulation,
+    /// Equalizer strategy used after training and pilot extraction.
     pub equalizer_mode: EqualizerMode,
+    /// Forward-error-correction mode applied to packet bits.
     pub fec_mode: FecMode,
+    /// Passband conversion path: direct legacy path or IQ path.
     pub passband_mode: PassbandMode,
+    /// Wake-preamble duration in milliseconds.
     pub wake_ms: f32,
+    /// Tone wake frequency in hertz when tone wake-up is enabled.
     pub wake_freq: f32,
+    /// Silence/guard interval inserted after the wake preamble, in milliseconds.
     pub wake_guard_ms: f32,
+    /// Wake-preamble family used before the OFDM body.
     pub wake_preamble: WakePreamble,
+    /// Start frequency of the chirp wake preamble in hertz.
     pub sync_chirp_f0: f32,
+    /// End frequency of the chirp wake preamble in hertz.
     pub sync_chirp_f1: f32,
+    /// Half-length of the repeated-half sync sequence, in baseband samples.
     pub sync_half_len: usize,
+    /// Maximum application payload bytes per packet fragment before FEC.
     pub packet_payload_bytes: usize,
+    /// Session identifier written into packet headers.
     pub session_id: u16,
 }
 
@@ -139,7 +165,9 @@ impl Default for OfdmConfig {
             nfft: 2048,
             ncp: 1024,
             base_freq_hz: None,
-            used_bins: vec![24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+            used_bins: vec![
+                24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+            ],
             pilot_bins: vec![24, 26, 28, 31, 33, 35, 38],
             num_pilots: None,
             use_pilots: Some(true),

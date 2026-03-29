@@ -4,6 +4,7 @@ mod baseband;
 pub mod config;
 pub mod constellation;
 pub mod crc;
+pub mod debug;
 mod eq;
 pub mod modem;
 pub mod packet;
@@ -18,19 +19,21 @@ pub use baseband::{
 };
 pub use config::{EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, WakePreamble};
 pub use constellation::{save_channel_compare_png, save_constellation_comparison_png};
+pub use debug::{
+    dump_passband_bins, dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
+    dump_passband_constellation, dump_passband_iq_chain, dump_passband_pilot_tracking,
+    dump_passband_sync_metric, EncodedBurst, EncodedPacketMeta, PassbandBinDump,
+    PassbandBinDumpRow, PassbandChannelCompareDump, PassbandChannelCompareRow,
+    PassbandConstellationDump, PassbandDiagnostics, PassbandIqChainDump, PassbandPilotTrackDump,
+    PassbandSyncDump,
+};
 pub use modem::{
     decode_encoded_burst_oracle, decode_single_packet_passband,
     decode_single_packet_passband_with_sync, decode_single_packet_passband_with_sync_rate,
     diagnose_passband_window, diagnose_passband_window_with_sync,
-    diagnose_passband_window_with_sync_rate, dump_passband_bins, dump_passband_bins_with_sync,
-    dump_passband_channel_compare_with_sync, dump_passband_constellation, dump_passband_iq_chain,
-    dump_passband_pilot_tracking, dump_passband_sync_metric, encode_payload,
-    encode_single_packet_passband, encode_single_packet_passband_body,
-    recover_decided_packet_bytes_passband_with_sync,
-    recover_decided_packet_bytes_passband_with_sync_rate, EncodedBurst, PassbandBinDump,
-    PassbandBinDumpRow, PassbandChannelCompareDump, PassbandChannelCompareRow,
-    PassbandConstellationDump, PassbandDiagnostics, PassbandIqChainDump, PassbandPilotTrackDump,
-    PassbandSyncDump,
+    diagnose_passband_window_with_sync_rate, encode_payload, encode_single_packet_passband,
+    encode_single_packet_passband_body, recover_decided_packet_bytes_passband_with_sync,
+    recover_decided_packet_bytes_passband_with_sync_rate,
 };
 pub use packet::{inspect_packet_bytes, PacketParseAttempt};
 pub use rustfft::num_complex::Complex32;

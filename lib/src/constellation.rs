@@ -7,7 +7,7 @@ use plotters::coord::Shift;
 use plotters::prelude::*;
 use rustfft::num_complex::Complex32;
 
-use crate::modem::PassbandChannelCompareDump;
+use crate::debug::PassbandChannelCompareDump;
 
 fn constellation_bounds(points: &[Complex32]) -> Option<f32> {
     let max_abs = points

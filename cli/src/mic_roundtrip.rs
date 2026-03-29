@@ -7,10 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use acoustic_ofdm::{
-    decode_single_packet_passband_with_sync, diagnose_passband_window_with_sync,
+    decode_single_packet_passband_with_sync, decode_single_packet_passband_with_sync_rate,
+    diagnose_passband_window_with_sync, diagnose_passband_window_with_sync_rate,
     dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
     dump_passband_constellation, dump_passband_iq_chain, inspect_packet_bytes,
-    recover_decided_packet_bytes_passband_with_sync, save_channel_compare_png,
+    recover_decided_packet_bytes_passband_with_sync_rate, save_channel_compare_png,
     save_constellation_comparison_png, save_spectrogram_png, save_spectrogram_png_with_options,
     save_wav_mono_i16, Complex32, OfdmConfig, PassbandBinDump, PassbandChannelCompareDump,
 };
@@ -266,6 +267,7 @@ pub(crate) fn cmd_mic_roundtrip(
         nominal_start_sec: f32,
         start_sec: f32,
         sync_off: usize,
+        time_scale: f32,
         sync_rms: f32,
         sync_peak: f32,
         post_rms: f32,
@@ -294,58 +296,94 @@ pub(crate) fn cmd_mic_roundtrip(
         } else {
             (sync_min..=sync_max).step_by(sync_step).collect()
         };
+        let time_scale_candidates: Vec<f32> = if opts.oracle {
+            vec![0.999, 0.9995, 1.0, 1.0005, 1.001]
+        } else {
+            vec![1.0]
+        };
         for sync_off in sync_candidates {
-            let payload = decode_single_packet_passband_with_sync(window, &cfg_rx, sync_off as f32);
-            let diag = diagnose_passband_window_with_sync(window, &cfg_rx, sync_off as f32);
-            let decoded = payload.is_some();
-            let cand = Candidate {
-                burst_idx: i + 1,
-                nominal_start_sec,
-                start_sec,
-                sync_off,
-                sync_rms: diag.sync_rms,
-                sync_peak: diag.sync_peak,
-                post_rms: diag.post_rms,
-                post_peak: diag.post_peak,
-                train_rms: diag.train_rms,
-                train_evm: diag.train_recon_evm,
-                pilot_evm: diag.pilot_residual_evm,
-                data_evm: diag.post_eq_evm,
-                decoded,
-                payload,
-            };
-            let oracle_match = opts.oracle
-                && cand
-                    .payload
-                    .as_deref()
-                    .map(|p| p == ORACLE_PAYLOAD)
-                    .unwrap_or(false);
-            let better = match &best_local {
-                Some(best) => {
-                    cand.decoded.cmp(&best.decoded).is_gt()
-                        || (cand.decoded == best.decoded
-                            && cand
-                                .data_evm
-                                .total_cmp(&best.data_evm)
-                                .then_with(|| best.train_rms.total_cmp(&cand.train_rms))
-                                .is_lt())
+            for &time_scale in &time_scale_candidates {
+                let payload = if (time_scale - 1.0).abs() <= f32::EPSILON {
+                    decode_single_packet_passband_with_sync(window, &cfg_rx, sync_off as f32)
+                } else {
+                    decode_single_packet_passband_with_sync_rate(
+                        window,
+                        &cfg_rx,
+                        sync_off as f32,
+                        time_scale,
+                    )
+                };
+                let diag = if (time_scale - 1.0).abs() <= f32::EPSILON {
+                    diagnose_passband_window_with_sync(window, &cfg_rx, sync_off as f32)
+                } else {
+                    diagnose_passband_window_with_sync_rate(
+                        window,
+                        &cfg_rx,
+                        sync_off as f32,
+                        time_scale,
+                    )
+                };
+                let decoded = payload.is_some();
+                let cand = Candidate {
+                    burst_idx: i + 1,
+                    nominal_start_sec,
+                    start_sec,
+                    sync_off,
+                    time_scale,
+                    sync_rms: diag.sync_rms,
+                    sync_peak: diag.sync_peak,
+                    post_rms: diag.post_rms,
+                    post_peak: diag.post_peak,
+                    train_rms: diag.train_rms,
+                    train_evm: diag.train_recon_evm,
+                    pilot_evm: diag.pilot_residual_evm,
+                    data_evm: diag.post_eq_evm,
+                    decoded,
+                    payload,
+                };
+                let oracle_match = opts.oracle
+                    && cand
+                        .payload
+                        .as_deref()
+                        .map(|p| p == ORACLE_PAYLOAD)
+                        .unwrap_or(false);
+                let better = match &best_local {
+                    Some(best) => {
+                        cand.decoded.cmp(&best.decoded).is_gt()
+                            || (cand.decoded == best.decoded
+                                && cand
+                                    .data_evm
+                                    .total_cmp(&best.data_evm)
+                                    .then_with(|| best.train_rms.total_cmp(&cand.train_rms))
+                                    .is_lt())
+                    }
+                    None => true,
+                };
+                if better || oracle_match {
+                    best_local = Some(cand.clone());
                 }
-                None => true,
-            };
-            if better || oracle_match {
-                best_local = Some(cand.clone());
+                if oracle_match {
+                    break;
+                }
             }
-            if oracle_match {
+            if opts.oracle
+                && best_local
+                    .as_ref()
+                    .and_then(|c| c.payload.as_deref())
+                    .map(|p| p == ORACLE_PAYLOAD)
+                    .unwrap_or(false)
+            {
                 break;
             }
         }
         if let Some(best) = best_local {
             info_line!(
-                "Burst {}: nominal={:.3}s best_start={:.3}s sync_off={} level[sync/post]=[peak {:.3}/{:.3}, rms {:.3}/{:.3}] evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}] decoded={}",
+                "Burst {}: nominal={:.3}s best_start={:.3}s sync_off={} time_scale={:.6} level[sync/post]=[peak {:.3}/{:.3}, rms {:.3}/{:.3}] evm[train/pilot/data]=[{:.3}/{:.3}/{:.3}] decoded={}",
                 best.burst_idx,
                 best.nominal_start_sec,
                 best.start_sec,
                 best.sync_off,
+                best.time_scale,
                 best.sync_peak,
                 best.post_peak,
                 best.sync_rms,
@@ -482,11 +520,12 @@ pub(crate) fn cmd_mic_roundtrip(
                 .collect::<Vec<_>>()
                 .join(" ");
             info_line!(
-                "Decoded {} bytes from burst={} start={:.3}s sync_off={}",
+                "Decoded {} bytes from burst={} start={:.3}s sync_off={} time_scale={:.6}",
                 payload.len(),
                 best.burst_idx,
                 best.start_sec,
-                best.sync_off
+                best.sync_off,
+                best.time_scale
             );
             info_line!("HEX: {hex}");
             info_line!("UTF8(lossy): {}", String::from_utf8_lossy(&payload));
@@ -495,10 +534,11 @@ pub(crate) fn cmd_mic_roundtrip(
     } else {
         if let Some(path) = &opts.dump_wav {
             if let Some(dir) = Path::new(path).parent() {
-                if let Some(raw) = recover_decided_packet_bytes_passband_with_sync(
+                if let Some(raw) = recover_decided_packet_bytes_passband_with_sync_rate(
                     window,
                     &cfg_rx,
                     best.sync_off as f32,
+                    best.time_scale,
                 ) {
                     let raw_path = dir.join("ofdm_pre_crc_bytes.bin");
                     std::fs::write(&raw_path, &raw)?;

@@ -2,7 +2,10 @@
 
 use rustfft::{num_complex::Complex32, FftPlanner};
 
-use crate::config::{EqualizerMode, Modulation, OfdmConfig, PassbandMode};
+use crate::config::{Modulation, OfdmConfig, PassbandMode};
+use crate::eq::{
+    equalize_symbol_with_pilots, equalizer_initial_channel, equalizer_refresh_channel,
+};
 use crate::packet::{
     bits_to_bytes, build_packet_bytes, bytes_to_bits, fec_decode_bits, fec_encode_bits,
     fec_encoded_bits_len, parse_packet_bytes, PacketInfo,
@@ -195,131 +198,6 @@ pub(crate) fn training_symbol_time_domain(used_bins: &[usize], cfg: &OfdmConfig)
         xtrain[bin] = train_known[k];
     }
     ifft(&xtrain)
-}
-
-pub(crate) fn estimate_channel_from_training(
-    ytrain: &[Complex32],
-    used_bins: &[usize],
-    train_known: &[Complex32],
-) -> Vec<Complex32> {
-    let mut hest = vec![Complex32::new(1.0, 0.0); used_bins.len()];
-    for (k, &bin) in used_bins.iter().enumerate() {
-        hest[k] = ytrain[bin] / train_known[k];
-    }
-    hest
-}
-
-pub(crate) fn equalizer_initial_channel(
-    cfg: &OfdmConfig,
-    ytrain: &[Complex32],
-    used_bins: &[usize],
-    train_known: &[Complex32],
-) -> Vec<Complex32> {
-    match cfg.equalizer_mode {
-        EqualizerMode::TrainingPilot => {
-            estimate_channel_from_training(ytrain, used_bins, train_known)
-        }
-        EqualizerMode::PilotOnly => vec![Complex32::new(1.0, 0.0); used_bins.len()],
-    }
-}
-
-pub(crate) fn equalizer_refresh_channel(
-    cfg: &OfdmConfig,
-    hest: &mut Vec<Complex32>,
-    y: &[Complex32],
-    used_bins: &[usize],
-    train_known: &[Complex32],
-) {
-    if matches!(cfg.equalizer_mode, EqualizerMode::TrainingPilot) {
-        *hest = estimate_channel_from_training(y, used_bins, train_known);
-    }
-}
-
-pub(crate) fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
-    let h_pow = h.norm_sqr();
-    let eps = (2.0e-2f32).max(1.0e-1f32 * h_pow);
-    let mut g = h.conj() / (h_pow + eps);
-    let gmax = 2.0f32;
-    let gnorm = g.norm();
-    if gnorm > gmax && gnorm.is_finite() {
-        g *= gmax / gnorm;
-    }
-    y * g
-}
-
-pub(crate) fn equalize_symbol_with_pilots(
-    y: &[Complex32],
-    used_bins: &[usize],
-    pilot_bins: &[usize],
-    pref: &[Complex32],
-    hest: &[Complex32],
-) -> Vec<Complex32> {
-    if used_bins.is_empty() || hest.len() != used_bins.len() {
-        return Vec::new();
-    }
-
-    let mut xeq_used = Vec::with_capacity(used_bins.len());
-    for (k, &bin) in used_bins.iter().enumerate() {
-        xeq_used.push(regularized_equalize(y[bin], hest[k]));
-    }
-
-    if !pilot_bins.is_empty() && !pref.is_empty() {
-        let mut pilot_phase_pts = Vec::<(f32, f32)>::new();
-        for (k, pbin) in pilot_bins.iter().enumerate() {
-            if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-                let ref_sym = pref[k];
-                if ref_sym.norm_sqr() > 1.0e-9 {
-                    pilot_phase_pts.push((*pbin as f32, (xeq_used[pos] * ref_sym.conj()).arg()));
-                }
-            }
-        }
-        if pilot_phase_pts.len() >= 2 {
-            for i in 1..pilot_phase_pts.len() {
-                let mut phi = pilot_phase_pts[i].1;
-                let prev = pilot_phase_pts[i - 1].1;
-                while phi - prev > std::f32::consts::PI {
-                    phi -= 2.0 * std::f32::consts::PI;
-                }
-                while phi - prev < -std::f32::consts::PI {
-                    phi += 2.0 * std::f32::consts::PI;
-                }
-                pilot_phase_pts[i].1 = phi;
-            }
-
-            let n = pilot_phase_pts.len() as f32;
-            let sx = pilot_phase_pts.iter().map(|(x, _)| *x).sum::<f32>();
-            let sy = pilot_phase_pts.iter().map(|(_, y)| *y).sum::<f32>();
-            let sxx = pilot_phase_pts.iter().map(|(x, _)| x * x).sum::<f32>();
-            let sxy = pilot_phase_pts.iter().map(|(x, y)| x * y).sum::<f32>();
-            let denom = n * sxx - sx * sx;
-            if denom.abs() > 1.0e-9 {
-                let slope = (n * sxy - sx * sy) / denom;
-                let intercept = (sy - slope * sx) / n;
-                for (k, &bin) in used_bins.iter().enumerate() {
-                    let ph = intercept + slope * (bin as f32);
-                    xeq_used[k] *= Complex32::from_polar(1.0, -ph);
-                }
-            }
-        }
-    }
-
-    let mut num = Complex32::new(0.0, 0.0);
-    let mut den = 0.0f32;
-    for (k, pbin) in pilot_bins.iter().enumerate() {
-        if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
-            num += xeq_used[pos] * pref[k].conj();
-            den += pref[k].norm_sqr();
-        }
-    }
-    if den > 1.0e-9 {
-        let g = num / den;
-        if g.norm() > 1.0e-6 && g.re.is_finite() && g.im.is_finite() {
-            for z in &mut xeq_used {
-                *z /= g;
-            }
-        }
-    }
-    xeq_used
 }
 
 pub(crate) fn map_bits(bits: &[u8], modulation: Modulation) -> Vec<Complex32> {
@@ -595,12 +473,12 @@ mod tests {
         let (used, pilots, data) = ofdm_bin_plan(&cfg);
         assert_eq!(
             used,
-            vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]
+            vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
         );
         assert!(pilots.is_empty());
         assert_eq!(
             data,
-            vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104]
+            vec![93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]
         );
     }
 

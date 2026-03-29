@@ -384,7 +384,7 @@ fn diagnose_passband_window_with_sync_opt(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
         if !pilot_bins.is_empty() {
             for (k, pbin) in pilot_bins.iter().enumerate() {
                 if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
@@ -495,7 +495,7 @@ pub(crate) fn dump_passband_constellation_impl(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
                 pre_eq.push(y[*dbin]);
@@ -579,7 +579,7 @@ pub(crate) fn dump_passband_pilot_tracking_impl(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
         let phase = pilot_phase_error(&xeq_used, &used_bins, &pilot_bins, &pref).unwrap_or(0.0);
         let mut pilot_eq_pre = Vec::new();
         let mut pilot_ref = Vec::new();
@@ -685,7 +685,7 @@ fn dump_passband_bins_with_sync_opt(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
         let mut pre_eq_used = Vec::with_capacity(used_bins.len());
         let mut post_eq_used = Vec::with_capacity(used_bins.len());
         for (k, &bin) in used_bins.iter().enumerate() {
@@ -784,7 +784,7 @@ pub(crate) fn dump_passband_channel_compare_with_sync_impl(
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
         let mut phase_by_bin = vec![0.0f32; used_bins.len()];
         if !pilot_bins.is_empty() && !pref.is_empty() {
             let mut pilot_phase_pts = Vec::<(f32, f32)>::new();

@@ -215,7 +215,8 @@ pub(crate) fn sync_quality_score_fractional(rbb: &[Complex32], cfg: &OfdmConfig,
         if s1 <= rbb_cfo.len() {
             let y = fft(&rbb_cfo[s0 + cfg.ncp..s0 + cfg.ncp + cfg.nfft]);
             let pref = known_pilot_symbols(pilot_bins.len(), 1);
-            let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+            let xeq_used =
+                equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
             let mut pilot_eq = Vec::new();
             let mut pilot_ref = Vec::new();
             for (k, pbin) in pilot_bins.iter().enumerate() {

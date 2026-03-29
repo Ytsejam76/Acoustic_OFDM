@@ -21,7 +21,10 @@ pub use baseband::{
     decode_packet_baseband, encode_single_packet_baseband, expected_single_packet_data_symbols,
     recover_single_packet_data_symbols,
 };
-pub use config::{EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, WakePreamble};
+pub use config::{
+    EqualizerBuilder, EqualizerConfig, EqualizerFeatures, FecMode, Modulation, OfdmConfig,
+    PassbandMode, WakePreamble,
+};
 pub use debug::{
     dump_passband_bins, dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,
     dump_passband_constellation, dump_passband_iq_chain, dump_passband_pilot_tracking,

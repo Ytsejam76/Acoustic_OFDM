@@ -4,7 +4,7 @@ use std::error::Error;
 use std::io::Read;
 
 use acoustic_ofdm::{
-    EqualizerMode, FecMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions,
+    EqualizerConfig, FecMode, Modulation, OfdmConfig, PassbandMode, SpectrogramOptions,
     SpectrogramWindow, WakePreamble,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -83,11 +83,18 @@ impl From<ModulationArg> for Modulation {
     }
 }
 
-impl From<EqualizerModeArg> for EqualizerMode {
+impl From<EqualizerModeArg> for EqualizerConfig {
     fn from(value: EqualizerModeArg) -> Self {
         match value {
-            EqualizerModeArg::TrainingPilot => EqualizerMode::TrainingPilot,
-            EqualizerModeArg::PilotOnly => EqualizerMode::PilotOnly,
+            EqualizerModeArg::TrainingPilot => EqualizerConfig::builder()
+                .training_baseline()
+                .pilot_phase()
+                .pilot_amplitude()
+                .build(),
+            EqualizerModeArg::PilotOnly => EqualizerConfig::builder()
+                .pilot_phase()
+                .pilot_amplitude()
+                .build(),
         }
     }
 }
@@ -412,7 +419,7 @@ pub(crate) fn apply_common_cfg(
         cfg.modulation = m.into();
     }
     if let Some(m) = common.equalizer_mode {
-        cfg.equalizer_mode = m.into();
+        cfg.equalizer = m.into();
     }
     if let Some(m) = common.fec_mode {
         cfg.fec_mode = m.into();

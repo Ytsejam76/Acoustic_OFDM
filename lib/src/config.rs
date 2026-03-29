@@ -9,20 +9,121 @@ pub enum Modulation {
     Qpsk,
 }
 
-/// Strategy used to build the equalizer channel model.
+/// Bitfield describing which equalizer stages are enabled.
 ///
 /// Rationale:
-/// The current receiver separates a static baseline from symbol-local pilot
-/// corrections. This enum controls whether the baseline comes from the training
-/// symbol or starts flat and relies on pilots almost entirely.
+/// The equalizer is now a pipeline of optional stages rather than a single
+/// monolithic mode. This bitfield lets the configuration express combinations
+/// such as:
+/// - training baseline + pilot phase
+/// - training baseline + pilot phase + pilot amplitude
+/// - pilot-only equalization
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EqualizerMode {
-    /// Use the training symbol as the baseline channel estimate and refine it
-    /// with pilot-derived residual correction on each data symbol.
-    TrainingPilot,
-    /// Start from a flat unit channel and let pilots provide the effective
-    /// correction, avoiding dependence on the training amplitude estimate.
-    PilotOnly,
+pub struct EqualizerFeatures(u32);
+
+impl Default for EqualizerFeatures {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl EqualizerFeatures {
+    /// No optional equalizer stages.
+    pub const NONE: Self = Self(0);
+    /// Use the training symbol as the baseline channel model.
+    pub const TRAINING_BASELINE: Self = Self(1 << 0);
+    /// Apply a pilot-derived residual phase fit on each data symbol.
+    pub const PILOT_PHASE: Self = Self(1 << 1);
+    /// Apply a pilot-derived residual amplitude fit on each data symbol.
+    pub const PILOT_AMPLITUDE: Self = Self(1 << 2);
+    /// Weight pilot observations by reliability when fitting corrections.
+    pub const WEIGHTED_PILOTS: Self = Self(1 << 3);
+
+    /// Returns whether all requested feature bits are enabled.
+    pub fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for EqualizerFeatures {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for EqualizerFeatures {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// Equalizer subsystem configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EqualizerConfig {
+    /// Enabled equalizer stages.
+    pub features: EqualizerFeatures,
+}
+
+impl EqualizerConfig {
+    /// Starts a builder for an equalizer configuration.
+    pub fn builder() -> EqualizerBuilder {
+        EqualizerBuilder::default()
+    }
+}
+
+impl Default for EqualizerConfig {
+    fn default() -> Self {
+        EqualizerConfig::builder()
+            .training_baseline()
+            .pilot_phase()
+            .pilot_amplitude()
+            .build()
+    }
+}
+
+/// Builder for [`EqualizerConfig`].
+///
+/// Rationale:
+/// The equalizer now consists of composable stages. The builder keeps call
+/// sites readable while still compiling down to simple feature checks.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EqualizerBuilder {
+    features: EqualizerFeatures,
+}
+
+impl EqualizerBuilder {
+    /// Enable training-symbol baseline equalization.
+    pub fn training_baseline(mut self) -> Self {
+        self.features |= EqualizerFeatures::TRAINING_BASELINE;
+        self
+    }
+
+    /// Enable pilot-derived residual phase correction.
+    pub fn pilot_phase(mut self) -> Self {
+        self.features |= EqualizerFeatures::PILOT_PHASE;
+        self
+    }
+
+    /// Enable pilot-derived residual amplitude correction.
+    pub fn pilot_amplitude(mut self) -> Self {
+        self.features |= EqualizerFeatures::PILOT_AMPLITUDE;
+        self
+    }
+
+    /// Enable reliability-weighted pilot fitting.
+    pub fn weighted_pilots(mut self) -> Self {
+        self.features |= EqualizerFeatures::WEIGHTED_PILOTS;
+        self
+    }
+
+    /// Finalize the equalizer configuration.
+    pub fn build(self) -> EqualizerConfig {
+        EqualizerConfig {
+            features: self.features,
+        }
+    }
 }
 
 /// Forward-error-correction scheme applied to packet bits.
@@ -151,8 +252,8 @@ pub struct OfdmConfig {
     pub terminal_training_symbol: bool,
     /// Data modulation used on the active data carriers.
     pub modulation: Modulation,
-    /// Equalizer strategy used after training and pilot extraction.
-    pub equalizer_mode: EqualizerMode,
+    /// Equalizer subsystem configuration.
+    pub equalizer: EqualizerConfig,
     /// Forward-error-correction mode applied to packet bits.
     pub fec_mode: FecMode,
     /// Passband conversion path: direct legacy path or IQ path.
@@ -202,7 +303,7 @@ impl Default for OfdmConfig {
             retrain_interval_data_symbols: None,
             terminal_training_symbol: false,
             modulation: Modulation::Bpsk,
-            equalizer_mode: EqualizerMode::TrainingPilot,
+            equalizer: EqualizerConfig::default(),
             fec_mode: FecMode::None,
             passband_mode: PassbandMode::Legacy,
             wake_ms: 80.0,

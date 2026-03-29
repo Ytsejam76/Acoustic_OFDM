@@ -2,7 +2,7 @@
 
 use rustfft::num_complex::Complex32;
 
-use crate::config::{EqualizerMode, Modulation, OfdmConfig};
+use crate::config::{EqualizerFeatures, Modulation, OfdmConfig};
 
 /// Estimates the training-symbol channel on the active carriers.
 ///
@@ -27,23 +27,26 @@ pub(crate) fn estimate_channel_from_training(
 /// Chooses the baseline equalizer channel model.
 ///
 /// Rationale:
-/// `TrainingPilot` uses the training estimate as the static baseline,
-/// while `PilotOnly` starts from a flat unit channel,
+/// When training-baseline equalization is enabled, the training estimate is
+/// used as the static baseline. Otherwise we start from a flat unit channel,
 ///
 /// $$\hat H_0[k] = 1$$
 ///
-/// and lets later pilot corrections carry the residual alignment.
+/// and let later pilot corrections carry the residual alignment.
 pub(crate) fn equalizer_initial_channel(
     cfg: &OfdmConfig,
     ytrain: &[Complex32],
     used_bins: &[usize],
     train_known: &[Complex32],
 ) -> Vec<Complex32> {
-    match cfg.equalizer_mode {
-        EqualizerMode::TrainingPilot => {
-            estimate_channel_from_training(ytrain, used_bins, train_known)
-        }
-        EqualizerMode::PilotOnly => vec![Complex32::new(1.0, 0.0); used_bins.len()],
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::TRAINING_BASELINE)
+    {
+        estimate_channel_from_training(ytrain, used_bins, train_known)
+    } else {
+        vec![Complex32::new(1.0, 0.0); used_bins.len()]
     }
 }
 
@@ -62,7 +65,11 @@ pub(crate) fn equalizer_refresh_channel(
     used_bins: &[usize],
     train_known: &[Complex32],
 ) {
-    if matches!(cfg.equalizer_mode, EqualizerMode::TrainingPilot) {
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::TRAINING_BASELINE)
+    {
         *hest = estimate_channel_from_training(y, used_bins, train_known);
     }
 }
@@ -128,6 +135,7 @@ fn equalize_symbol_with_baseline(
 ///
 /// and applies both before a final common pilot normalization.
 pub(crate) fn equalize_symbol_with_pilots(
+    cfg: &OfdmConfig,
     y: &[Complex32],
     used_bins: &[usize],
     pilot_bins: &[usize],
@@ -140,13 +148,24 @@ pub(crate) fn equalize_symbol_with_pilots(
 
     let mut xeq_used = equalize_symbol_with_baseline(y, used_bins, hest);
 
-    if !pilot_bins.is_empty() && !pref.is_empty() {
-        let mut pilot_phase_pts = Vec::<(f32, f32)>::new();
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::PILOT_PHASE)
+        && !pilot_bins.is_empty()
+        && !pref.is_empty()
+    {
+        let mut pilot_phase_pts = Vec::<(f32, f32, f32)>::new();
         for (k, pbin) in pilot_bins.iter().enumerate() {
             if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
                 let ref_sym = pref[k];
                 if ref_sym.norm_sqr() > 1.0e-9 {
-                    pilot_phase_pts.push((*pbin as f32, (xeq_used[pos] * ref_sym.conj()).arg()));
+                    let residual = xeq_used[pos] * ref_sym.conj();
+                    pilot_phase_pts.push((
+                        *pbin as f32,
+                        residual.arg(),
+                        pilot_weight(xeq_used[pos], ref_sym, cfg),
+                    ));
                 }
             }
         }
@@ -159,15 +178,27 @@ pub(crate) fn equalize_symbol_with_pilots(
                 }
             }
         }
+    }
 
-        let mut pilot_amp_pts = Vec::<(f32, f32)>::new();
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::PILOT_AMPLITUDE)
+        && !pilot_bins.is_empty()
+        && !pref.is_empty()
+    {
+        let mut pilot_amp_pts = Vec::<(f32, f32, f32)>::new();
         for (k, pbin) in pilot_bins.iter().enumerate() {
             if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
                 let ref_sym = pref[k];
                 let ref_mag = ref_sym.norm();
                 if ref_mag > 1.0e-6 {
                     let gain = (xeq_used[pos].norm() / ref_mag).clamp(0.5, 2.0);
-                    pilot_amp_pts.push((*pbin as f32, gain));
+                    pilot_amp_pts.push((
+                        *pbin as f32,
+                        gain,
+                        pilot_weight(xeq_used[pos], ref_sym, cfg),
+                    ));
                 }
             }
         }
@@ -225,21 +256,21 @@ fn baseline_channel_model(hest: &[Complex32]) -> (Vec<f32>, Vec<f32>) {
 ///
 /// is therefore a better constrained correction than independent per-bin pilot
 /// updates.
-fn fit_phase_line(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
+fn fit_phase_line(pts: &[(f32, f32, f32)]) -> Option<(f32, f32)> {
     if pts.len() < 2 {
         return None;
     }
-    let n = pts.len() as f32;
-    let sx = pts.iter().map(|(x, _)| *x).sum::<f32>();
-    let sy = pts.iter().map(|(_, y)| *y).sum::<f32>();
-    let sxx = pts.iter().map(|(x, _)| x * x).sum::<f32>();
-    let sxy = pts.iter().map(|(x, y)| x * y).sum::<f32>();
-    let denom = n * sxx - sx * sx;
+    let sw = pts.iter().map(|(_, _, w)| *w).sum::<f32>();
+    let sx = pts.iter().map(|(x, _, w)| x * w).sum::<f32>();
+    let sy = pts.iter().map(|(_, y, w)| y * w).sum::<f32>();
+    let sxx = pts.iter().map(|(x, _, w)| x * x * w).sum::<f32>();
+    let sxy = pts.iter().map(|(x, y, w)| x * y * w).sum::<f32>();
+    let denom = sw * sxx - sx * sx;
     if denom.abs() <= 1.0e-9 {
         return None;
     }
-    let slope = (n * sxy - sx * sy) / denom;
-    let intercept = (sy - slope * sx) / n;
+    let slope = (sw * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / sw;
     Some((intercept, slope))
 }
 
@@ -253,24 +284,24 @@ fn fit_phase_line(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
 ///
 /// The fit is intentionally low-order and later clamped to avoid noisy gain
 /// excursions on weak pilots.
-fn fit_real_line(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
+fn fit_real_line(pts: &[(f32, f32, f32)]) -> Option<(f32, f32)> {
     if pts.is_empty() {
         return None;
     }
     if pts.len() == 1 {
         return Some((pts[0].1, 0.0));
     }
-    let n = pts.len() as f32;
-    let sx = pts.iter().map(|(x, _)| *x).sum::<f32>();
-    let sy = pts.iter().map(|(_, y)| *y).sum::<f32>();
-    let sxx = pts.iter().map(|(x, _)| x * x).sum::<f32>();
-    let sxy = pts.iter().map(|(x, y)| x * y).sum::<f32>();
-    let denom = n * sxx - sx * sx;
+    let sw = pts.iter().map(|(_, _, w)| *w).sum::<f32>();
+    let sx = pts.iter().map(|(x, _, w)| x * w).sum::<f32>();
+    let sy = pts.iter().map(|(_, y, w)| y * w).sum::<f32>();
+    let sxx = pts.iter().map(|(x, _, w)| x * x * w).sum::<f32>();
+    let sxy = pts.iter().map(|(x, y, w)| x * y * w).sum::<f32>();
+    let denom = sw * sxx - sx * sx;
     if denom.abs() <= 1.0e-9 {
-        return Some((sy / n, 0.0));
+        return Some((sy / sw.max(1.0e-9), 0.0));
     }
-    let slope = (n * sxy - sx * sy) / denom;
-    let intercept = (sy - slope * sx) / n;
+    let slope = (sw * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / sw;
     Some((intercept, slope))
 }
 
@@ -340,7 +371,7 @@ pub(crate) fn decision_directed_evm(syms: &[Complex32], modulation: Modulation) 
     rms_evm(syms, &refs)
 }
 
-fn unwrap_phase_points(pts: &mut [(f32, f32)]) {
+fn unwrap_phase_points(pts: &mut [(f32, f32, f32)]) {
     for i in 1..pts.len() {
         let mut phi = pts[i].1;
         let prev = pts[i - 1].1;
@@ -352,6 +383,18 @@ fn unwrap_phase_points(pts: &mut [(f32, f32)]) {
         }
         pts[i].1 = phi;
     }
+}
+
+fn pilot_weight(z: Complex32, pref: Complex32, cfg: &OfdmConfig) -> f32 {
+    if !cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::WEIGHTED_PILOTS)
+    {
+        return 1.0;
+    }
+    let err = (z - pref).norm_sqr();
+    (1.0 / (0.05 + err)).clamp(0.1, 10.0)
 }
 
 /// Unwraps a phase sequence over bin index.

@@ -142,7 +142,7 @@ fn equalized_data_symbols_baseband(rbb: &[Complex32], cfg: &OfdmConfig) -> Optio
             continue;
         }
         let pref = known_pilot_symbols(pilot_bins.len(), data_symbol_idx + 1);
-        let xeq_used = equalize_symbol_with_pilots(&y, &used_bins, &pilot_bins, &pref, &hest);
+        let xeq_used = equalize_symbol_with_pilots(cfg, &y, &used_bins, &pilot_bins, &pref, &hest);
         for dbin in &data_bins {
             if let Some(pos) = used_bins.iter().position(|b| b == dbin) {
                 rx_syms.push(xeq_used[pos]);

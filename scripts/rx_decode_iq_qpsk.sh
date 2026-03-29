@@ -14,6 +14,9 @@ rm -f \
   "$OUT_DIR/tx_roundtrip_iq_qpsk.wav" \
   "$OUT_DIR/tx_packet_iq_qpsk.wav" \
   "$OUT_DIR/tx_symbols_only_iq_qpsk.wav" \
+  "$OUT_DIR/tx_roundtrip_iq_qpsk.png" \
+  "$OUT_DIR/tx_packet_iq_qpsk.png" \
+  "$OUT_DIR/tx_symbols_only_iq_qpsk.png" \
   "$OUT_DIR/rx_capture_iq_qpsk.wav" \
   "$OUT_DIR/rx_spectrogram_iq_qpsk.png" \
   "$OUT_DIR/ofdm_decode_bins.csv" \
@@ -29,10 +32,11 @@ cargo run -p acoustic_ofdm_cli -- \
   encode \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 22050 \
-  --nfft 1024 \
-  --ncp 512 \
-  --sync-half-len 1024 \
+  --carrier-freq 10000 \
+  --fs-baseband 16000 \
+  --nfft 2048 \
+  --ncp 1024 \
+  --sync-half-len 2048 \
   --modulation qpsk \
   "$OUT_DIR/tx_packet_iq_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
@@ -41,23 +45,36 @@ cargo run -p acoustic_ofdm_cli -- \
   encode-body \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 22050 \
-  --nfft 1024 \
-  --ncp 512 \
-  --sync-half-len 1024 \
+  --carrier-freq 10000 \
+  --fs-baseband 16000 \
+  --nfft 2048 \
+  --ncp 1024 \
+  --sync-half-len 2048 \
   --modulation qpsk \
   "$OUT_DIR/tx_symbols_only_iq_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
 
-exec cargo run -p acoustic_ofdm_cli -- \
+cargo run -p acoustic_ofdm_cli -- \
+  spectrogram \
+  --in-wav "$OUT_DIR/tx_packet_iq_qpsk.wav" \
+  --out-png "$OUT_DIR/tx_packet_iq_qpsk.png"
+
+cargo run -p acoustic_ofdm_cli -- \
+  spectrogram \
+  --in-wav "$OUT_DIR/tx_symbols_only_iq_qpsk.wav" \
+  --out-png "$OUT_DIR/tx_symbols_only_iq_qpsk.png"
+
+set +e
+cargo run -p acoustic_ofdm_cli -- \
   mic-roundtrip \
   --profile live-debug \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --fs-baseband 22050 \
-  --nfft 1024 \
-  --ncp 512 \
-  --sync-half-len 1024 \
+  --carrier-freq 10000 \
+  --fs-baseband 16000 \
+  --nfft 2048 \
+  --ncp 1024 \
+  --sync-half-len 2048 \
   --modulation qpsk \
   --duration-sec "$DURATION" \
   --mic-gain 0.6 \
@@ -72,3 +89,14 @@ exec cargo run -p acoustic_ofdm_cli -- \
   --spectrogram-path "$OUT_DIR/rx_spectrogram_iq_qpsk.png" \
   --log-level debug \
   --log-file "$LOG"
+status=$?
+set -e
+
+if [ -f "$OUT_DIR/tx_roundtrip_iq_qpsk.wav" ]; then
+  cargo run -p acoustic_ofdm_cli -- \
+    spectrogram \
+    --in-wav "$OUT_DIR/tx_roundtrip_iq_qpsk.wav" \
+    --out-png "$OUT_DIR/tx_roundtrip_iq_qpsk.png"
+fi
+
+exit "$status"

@@ -296,11 +296,7 @@ pub(crate) fn cmd_mic_roundtrip(
         } else {
             (sync_min..=sync_max).step_by(sync_step).collect()
         };
-        let time_scale_candidates: Vec<f32> = if opts.oracle {
-            vec![0.999, 0.9995, 1.0, 1.0005, 1.001]
-        } else {
-            vec![1.0]
-        };
+        let time_scale_candidates: Vec<f32> = vec![1.0];
         for sync_off in sync_candidates {
             for &time_scale in &time_scale_candidates {
                 let payload = if (time_scale - 1.0).abs() <= f32::EPSILON {
@@ -543,6 +539,11 @@ pub(crate) fn cmd_mic_roundtrip(
                     let raw_path = dir.join("ofdm_pre_crc_bytes.bin");
                     std::fs::write(&raw_path, &raw)?;
                     let inspect = inspect_packet_bytes(&raw);
+                    let raw_hex = raw
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     info_line!("Saved pre-CRC bytes: {}", raw_path.display());
                     info_line!(
                         "Pre-CRC packet inspect: preamble_ok={} header_ok={} payload_len={:?} total_len={:?} enough_total={} crc_ok={}",
@@ -553,6 +554,23 @@ pub(crate) fn cmd_mic_roundtrip(
                         inspect.enough_for_total,
                         inspect.crc_ok
                     );
+                    info_line!("Partial raw HEX: {raw_hex}");
+                    info_line!("Partial raw UTF8(lossy): {}", String::from_utf8_lossy(&raw));
+                    if let (Some(plen), true) = (inspect.payload_len, inspect.enough_for_total) {
+                        if raw.len() >= 9 + plen {
+                            let payload_bytes = &raw[9..9 + plen];
+                            let payload_hex = payload_bytes
+                                .iter()
+                                .map(|b| format!("{b:02X}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            info_line!("Partial payload HEX: {payload_hex}");
+                            info_line!(
+                                "Partial payload UTF8(lossy): {}",
+                                String::from_utf8_lossy(payload_bytes)
+                            );
+                        }
+                    }
                 }
             }
         }

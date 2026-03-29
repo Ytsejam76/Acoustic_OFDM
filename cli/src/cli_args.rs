@@ -130,7 +130,15 @@ impl From<PassbandModeArg> for PassbandMode {
 
 #[derive(Debug, Clone, Args, Default)]
 pub(crate) struct CommonCfgArgs {
-    #[arg(short = 'b', long)]
+    #[arg(long, help = "Passband carrier frequency in Hz")]
+    pub(crate) carrier_freq: Option<f32>,
+    #[arg(long, help = "OFDM base/bin-origin frequency in Hz")]
+    pub(crate) ofdm_base_freq: Option<f32>,
+    #[arg(long, hide = true)]
+    pub(crate) carrier_freq_hz: Option<f32>,
+    #[arg(long, hide = true)]
+    pub(crate) ofdm_base_freq_hz: Option<f32>,
+    #[arg(short = 'b', long, hide = true)]
     pub(crate) base_freq_hz: Option<f32>,
     #[arg(long)]
     pub(crate) fs_baseband: Option<f32>,
@@ -399,9 +407,19 @@ pub(crate) fn apply_common_cfg(
     cfg: &mut OfdmConfig,
     common: &CommonCfgArgs,
 ) -> Result<(), Box<dyn Error>> {
-    if let Some(hz) = common.base_freq_hz {
+    if let Some(hz) = common.carrier_freq.or(common.carrier_freq_hz) {
         if !hz.is_finite() || hz <= 0.0 {
-            return Err("base frequency must be a positive finite number".into());
+            return Err("carrier frequency must be a positive finite number".into());
+        }
+        cfg.fc = hz;
+    }
+    if let Some(hz) = common
+        .ofdm_base_freq
+        .or(common.ofdm_base_freq_hz)
+        .or(common.base_freq_hz)
+    {
+        if !hz.is_finite() || hz <= 0.0 {
+            return Err("OFDM base frequency must be a positive finite number".into());
         }
         cfg.base_freq_hz = Some(hz);
     }

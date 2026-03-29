@@ -136,7 +136,7 @@ printf "hello-ofdm" | cargo run -p acoustic_ofdm_cli -- roundtrip --stdout /tmp/
 Roundtrip with custom OFDM base subcarrier frequency:
 
 ```bash
-cargo run -p acoustic_ofdm_cli -- roundtrip --base-freq-hz 2000 /tmp/ofdm.wav "hello-ofdm"
+cargo run -p acoustic_ofdm_cli -- roundtrip --ofdm-base-freq 2000 /tmp/ofdm.wav "hello-ofdm"
 ```
 
 Generate OFDM body only (no calibration, no wake, no guard):

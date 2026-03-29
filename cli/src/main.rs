@@ -176,7 +176,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "acoustic_ofdm_cli",
             "encode",
-            "--base-freq-hz",
+            "--carrier-freq",
             "2500",
             "--wake-preamble",
             "gold",
@@ -186,7 +186,7 @@ mod tests {
         .expect("parse failed");
         match cli.command {
             Commands::Encode(cmd) => {
-                assert_eq!(cmd.common.base_freq_hz, Some(2500.0));
+                assert_eq!(cmd.common.carrier_freq, Some(2500.0));
                 assert_eq!(cmd.common.wake_preamble, Some(WakePreambleArg::Gold));
                 assert_eq!(cmd.out_wav, "out.wav");
                 assert_eq!(cmd.payload_text, "hello");

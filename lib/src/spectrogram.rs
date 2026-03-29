@@ -153,7 +153,7 @@ pub fn save_spectrogram_png_with_options(
     let (main_area, legend_area) = root.split_horizontally(1120);
 
     let mut chart = ChartBuilder::on(&main_area)
-        .caption("RX Spectrogram", ("sans-serif", 28).into_font())
+        .caption("Spectrogram", ("sans-serif", 28).into_font())
         .margin(20)
         .x_label_area_size(45)
         .y_label_area_size(60)

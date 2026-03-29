@@ -91,17 +91,42 @@ pub(crate) fn regularized_equalize(y: Complex32, h: Complex32) -> Complex32 {
     y * g
 }
 
-/// Equalizes one OFDM symbol and applies a pilot-derived phase model.
+/// Equalizes one OFDM symbol against a baseline channel model.
 ///
 /// Rationale:
-/// The training symbol gives the static baseline, while pilots capture the
-/// symbol-local residual phase trend. The current model fits a linear phase
-/// residual over bin index,
+/// We explicitly separate the training estimate into amplitude and phase,
+///
+/// $$\hat H_0[k] = \hat A_0[k] e^{j \hat \phi_0[k]}$$
+///
+/// and invert that baseline before applying any pilot-derived residual.
+fn equalize_symbol_with_baseline(
+    y: &[Complex32],
+    used_bins: &[usize],
+    hest: &[Complex32],
+) -> Vec<Complex32> {
+    let (amp0, phase0) = baseline_channel_model(hest);
+    let mut xeq_used = Vec::with_capacity(used_bins.len());
+    for (k, &bin) in used_bins.iter().enumerate() {
+        let h0 = Complex32::from_polar(amp0[k], phase0[k]);
+        xeq_used.push(regularized_equalize(y[bin], h0));
+    }
+    xeq_used
+}
+
+/// Equalizes one OFDM symbol and applies pilot-derived residual correction.
+///
+/// Rationale:
+/// The training symbol gives the static baseline amplitude/phase model, while
+/// pilots capture the symbol-local residual phase trend. The current model fits
+/// a linear phase residual over bin index,
 ///
 /// $$\Delta \phi(k) = a + b k$$
 ///
-/// and derotates all used bins by that trend before a final common pilot
-/// normalization.
+/// then optionally fits a smooth residual amplitude line,
+///
+/// $$\Delta A(k) = c + d k$$
+///
+/// and applies both before a final common pilot normalization.
 pub(crate) fn equalize_symbol_with_pilots(
     y: &[Complex32],
     used_bins: &[usize],
@@ -113,10 +138,7 @@ pub(crate) fn equalize_symbol_with_pilots(
         return Vec::new();
     }
 
-    let mut xeq_used = Vec::with_capacity(used_bins.len());
-    for (k, &bin) in used_bins.iter().enumerate() {
-        xeq_used.push(regularized_equalize(y[bin], hest[k]));
-    }
+    let mut xeq_used = equalize_symbol_with_baseline(y, used_bins, hest);
 
     if !pilot_bins.is_empty() && !pref.is_empty() {
         let mut pilot_phase_pts = Vec::<(f32, f32)>::new();
@@ -130,20 +152,29 @@ pub(crate) fn equalize_symbol_with_pilots(
         }
         if pilot_phase_pts.len() >= 2 {
             unwrap_phase_points(&mut pilot_phase_pts);
-
-            let n = pilot_phase_pts.len() as f32;
-            let sx = pilot_phase_pts.iter().map(|(x, _)| *x).sum::<f32>();
-            let sy = pilot_phase_pts.iter().map(|(_, y)| *y).sum::<f32>();
-            let sxx = pilot_phase_pts.iter().map(|(x, _)| x * x).sum::<f32>();
-            let sxy = pilot_phase_pts.iter().map(|(x, y)| x * y).sum::<f32>();
-            let denom = n * sxx - sx * sx;
-            if denom.abs() > 1.0e-9 {
-                let slope = (n * sxy - sx * sy) / denom;
-                let intercept = (sy - slope * sx) / n;
+            if let Some((intercept, slope)) = fit_phase_line(&pilot_phase_pts) {
                 for (k, &bin) in used_bins.iter().enumerate() {
                     let ph = intercept + slope * (bin as f32);
                     xeq_used[k] *= Complex32::from_polar(1.0, -ph);
                 }
+            }
+        }
+
+        let mut pilot_amp_pts = Vec::<(f32, f32)>::new();
+        for (k, pbin) in pilot_bins.iter().enumerate() {
+            if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                let ref_sym = pref[k];
+                let ref_mag = ref_sym.norm();
+                if ref_mag > 1.0e-6 {
+                    let gain = (xeq_used[pos].norm() / ref_mag).clamp(0.5, 2.0);
+                    pilot_amp_pts.push((*pbin as f32, gain));
+                }
+            }
+        }
+        if let Some((intercept, slope)) = fit_real_line(&pilot_amp_pts) {
+            for (k, &bin) in used_bins.iter().enumerate() {
+                let amp = (intercept + slope * (bin as f32)).clamp(0.5, 2.0);
+                xeq_used[k] /= amp;
             }
         }
     }
@@ -165,6 +196,82 @@ pub(crate) fn equalize_symbol_with_pilots(
         }
     }
     xeq_used
+}
+
+/// Builds a smooth baseline channel model from the training estimate.
+///
+/// Rationale:
+/// The raw training LS estimate is too noisy to trust literally on magnitude.
+/// We therefore keep phase as a per-bin baseline, but smooth the magnitude
+/// across neighboring bins:
+///
+/// $$\hat A_0[k] \leftarrow \mathrm{smooth}(|\hat H_{\text{train}}[k]|)$$
+///
+/// which reduces weak-bin overreaction before pilots apply per-symbol phase
+/// correction.
+fn baseline_channel_model(hest: &[Complex32]) -> (Vec<f32>, Vec<f32>) {
+    let amps = smooth_real_line(&hest.iter().map(|h| h.norm()).collect::<Vec<_>>());
+    let phases = unwrap_phases(&hest.iter().map(|h| h.arg()).collect::<Vec<_>>());
+    (amps, phases)
+}
+
+/// Fits a residual pilot phase line over bin index.
+///
+/// Rationale:
+/// The dominant residual we keep seeing is timing-like phase slope across bins.
+/// A least-squares line,
+///
+/// $$\Delta \phi(k) \approx a + b k$$
+///
+/// is therefore a better constrained correction than independent per-bin pilot
+/// updates.
+fn fit_phase_line(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
+    if pts.len() < 2 {
+        return None;
+    }
+    let n = pts.len() as f32;
+    let sx = pts.iter().map(|(x, _)| *x).sum::<f32>();
+    let sy = pts.iter().map(|(_, y)| *y).sum::<f32>();
+    let sxx = pts.iter().map(|(x, _)| x * x).sum::<f32>();
+    let sxy = pts.iter().map(|(x, y)| x * y).sum::<f32>();
+    let denom = n * sxx - sx * sx;
+    if denom.abs() <= 1.0e-9 {
+        return None;
+    }
+    let slope = (n * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / n;
+    Some((intercept, slope))
+}
+
+/// Fits a smooth real-valued residual over bin index.
+///
+/// Rationale:
+/// Residual pilot amplitude tends to vary slowly across the active band, so a
+/// first-order fit is a safer correction than per-bin inversion:
+///
+/// $$\Delta A(k) \approx c + d k$$
+///
+/// The fit is intentionally low-order and later clamped to avoid noisy gain
+/// excursions on weak pilots.
+fn fit_real_line(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
+    if pts.is_empty() {
+        return None;
+    }
+    if pts.len() == 1 {
+        return Some((pts[0].1, 0.0));
+    }
+    let n = pts.len() as f32;
+    let sx = pts.iter().map(|(x, _)| *x).sum::<f32>();
+    let sy = pts.iter().map(|(_, y)| *y).sum::<f32>();
+    let sxx = pts.iter().map(|(x, _)| x * x).sum::<f32>();
+    let sxy = pts.iter().map(|(x, y)| x * y).sum::<f32>();
+    let denom = n * sxx - sx * sx;
+    if denom.abs() <= 1.0e-9 {
+        return Some((sy / n, 0.0));
+    }
+    let slope = (n * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / n;
+    Some((intercept, slope))
 }
 
 /// Computes RMS EVM against a known reference constellation.
@@ -245,6 +352,56 @@ fn unwrap_phase_points(pts: &mut [(f32, f32)]) {
         }
         pts[i].1 = phi;
     }
+}
+
+/// Unwraps a phase sequence over bin index.
+///
+/// Rationale:
+/// Wrapped phase jumps at $\pm \pi$ are artificial. Unwrapping restores the
+/// continuous phase trend needed for fitting or smoothing across bins.
+fn unwrap_phases(phases: &[f32]) -> Vec<f32> {
+    if phases.is_empty() {
+        return Vec::new();
+    }
+    let mut out = phases.to_vec();
+    for i in 1..out.len() {
+        let mut phi = out[i];
+        let prev = out[i - 1];
+        while phi - prev > std::f32::consts::PI {
+            phi -= 2.0 * std::f32::consts::PI;
+        }
+        while phi - prev < -std::f32::consts::PI {
+            phi += 2.0 * std::f32::consts::PI;
+        }
+        out[i] = phi;
+    }
+    out
+}
+
+/// Smooths a real-valued line with a short symmetric kernel.
+///
+/// Rationale:
+/// Training magnitude is useful as a baseline, but noisy per-bin inverses are
+/// fragile. A local average keeps the gross envelope while avoiding aggressive
+/// gain excursions on isolated weak bins.
+fn smooth_real_line(x: &[f32]) -> Vec<f32> {
+    if x.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![0.0f32; x.len()];
+    for i in 0..x.len() {
+        let i0 = i.saturating_sub(1);
+        let i1 = (i + 1).min(x.len() - 1);
+        let mut sum = 0.0f32;
+        let mut wsum = 0.0f32;
+        for j in i0..=i1 {
+            let w = if j == i { 0.5 } else { 0.25 };
+            sum += w * x[j];
+            wsum += w;
+        }
+        out[i] = (sum / wsum).max(1.0e-3);
+    }
+    out
 }
 
 // vim: set ts=4 sw=4 et:

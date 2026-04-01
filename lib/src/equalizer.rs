@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use rustfft::num_complex::Complex32;
+use rustfft::FftPlanner;
 
 use crate::config::{EqualizerFeatures, Modulation, OfdmConfig};
 
@@ -207,6 +208,42 @@ fn equalize_symbol_with_pilots_instantaneous(
     }
 
     let mut xeq_used = equalize_symbol_with_baseline(cfg, state, y, used_bins, hest);
+
+    if cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::PILOT_IFFT_DENOISE)
+        && !pilot_bins.is_empty()
+        && !pref.is_empty()
+    {
+        if let Some(residual_curve) =
+            pilot_residual_ifft_curve(cfg, &xeq_used, used_bins, pilot_bins, pref)
+        {
+            for (z, corr) in xeq_used.iter_mut().zip(residual_curve.iter()) {
+                if corr.norm() > 1.0e-3 && corr.re.is_finite() && corr.im.is_finite() {
+                    *z /= *corr;
+                }
+            }
+        }
+
+        let mut num = Complex32::new(0.0, 0.0);
+        let mut den = 0.0f32;
+        for (k, pbin) in pilot_bins.iter().enumerate() {
+            if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+                num += xeq_used[pos] * pref[k].conj();
+                den += pref[k].norm_sqr();
+            }
+        }
+        if den > 1.0e-9 {
+            let g = num / den;
+            if g.norm() > 1.0e-6 && g.re.is_finite() && g.im.is_finite() {
+                for z in &mut xeq_used {
+                    *z /= g;
+                }
+            }
+        }
+        return xeq_used;
+    }
 
     if cfg
         .equalizer
@@ -695,6 +732,77 @@ fn smooth_real_line(x: &[f32]) -> Vec<f32> {
         out[i] = (sum / wsum).max(1.0e-3);
     }
     out
+}
+
+fn pilot_residual_ifft_curve(
+    cfg: &OfdmConfig,
+    xeq_used: &[Complex32],
+    used_bins: &[usize],
+    pilot_bins: &[usize],
+    pref: &[Complex32],
+) -> Option<Vec<Complex32>> {
+    let mut pts = Vec::<(usize, Complex32, f32)>::new();
+    for (k, pbin) in pilot_bins.iter().enumerate() {
+        if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
+            let ref_sym = pref[k];
+            if ref_sym.norm_sqr() > 1.0e-9 {
+                pts.push((
+                    pos,
+                    xeq_used[pos] / ref_sym,
+                    pilot_weight(xeq_used[pos], ref_sym, cfg),
+                ));
+            }
+        }
+    }
+    if pts.len() < 2 {
+        return None;
+    }
+
+    let mut curve = vec![Complex32::new(1.0, 0.0); used_bins.len()];
+    for i in 0..curve.len() {
+        if i <= pts[0].0 {
+            curve[i] = pts[0].1;
+            continue;
+        }
+        if i >= pts[pts.len() - 1].0 {
+            curve[i] = pts[pts.len() - 1].1;
+            continue;
+        }
+        let mut seg = 0usize;
+        while seg + 1 < pts.len() && i > pts[seg + 1].0 {
+            seg += 1;
+        }
+        let (i0, z0, w0) = pts[seg];
+        let (i1, z1, w1) = pts[seg + 1];
+        let t = ((i - i0) as f32 / (i1 - i0).max(1) as f32).clamp(0.0, 1.0);
+        let zlin = z0 * (1.0 - t) + z1 * t;
+        let w = ((1.0 - t) * w0 + t * w1).clamp(0.1, 10.0);
+        curve[i] = Complex32::new(zlin.re * w, zlin.im * w);
+    }
+
+    let mut planner = FftPlanner::<f32>::new();
+    let ifft = planner.plan_fft_inverse(curve.len());
+    let fft = planner.plan_fft_forward(curve.len());
+    let mut taps = curve.clone();
+    ifft.process(&mut taps);
+    let scale = 1.0 / (curve.len() as f32).sqrt();
+    for v in &mut taps {
+        *v *= scale;
+    }
+
+    let keep = 4usize.min(taps.len());
+    for tap in taps.iter_mut().skip(keep) {
+        *tap = Complex32::new(0.0, 0.0);
+    }
+
+    fft.process(&mut taps);
+    for v in &mut taps {
+        *v *= scale;
+        let mag = v.norm().clamp(0.5, 2.0);
+        let phase = v.arg();
+        *v = Complex32::from_polar(mag, phase);
+    }
+    Some(taps)
 }
 
 // vim: set ts=4 sw=4 et:

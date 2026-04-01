@@ -42,6 +42,8 @@ impl EqualizerFeatures {
     pub const NOISE_AWARE_MMSE: Self = Self(1 << 4);
     /// Use temporal least-squares tracking on pilot-derived phase-line parameters.
     pub const TEMPORAL_LS: Self = Self(1 << 5);
+    /// Interpolate pilot residuals and denoise them in the delay domain.
+    pub const PILOT_IFFT_DENOISE: Self = Self(1 << 6);
 
     /// Returns whether all requested feature bits are enabled.
     pub fn contains(self, other: Self) -> bool {
@@ -136,6 +138,12 @@ impl EqualizerBuilder {
     pub fn temporal_ls(mut self, window: usize) -> Self {
         self.features |= EqualizerFeatures::TEMPORAL_LS;
         self.temporal_window = window.max(1);
+        self
+    }
+
+    /// Enable pilot-residual interpolation followed by delay-domain denoising.
+    pub fn pilot_ifft_denoise(mut self) -> Self {
+        self.features |= EqualizerFeatures::PILOT_IFFT_DENOISE;
         self
     }
 

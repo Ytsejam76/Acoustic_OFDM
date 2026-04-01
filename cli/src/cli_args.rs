@@ -30,6 +30,7 @@ pub(crate) enum ModulationArg {
 pub(crate) enum EqualizerModeArg {
     TrainingPilot,
     PilotOnly,
+    PilotDenoise,
     TemporalLs,
 }
 
@@ -97,6 +98,11 @@ impl From<EqualizerModeArg> for EqualizerConfig {
                 .pilot_phase()
                 .pilot_amplitude()
                 .weighted_pilots()
+                .build(),
+            EqualizerModeArg::PilotDenoise => EqualizerConfig::builder()
+                .training_baseline()
+                .weighted_pilots()
+                .pilot_ifft_denoise()
                 .build(),
             EqualizerModeArg::TemporalLs => EqualizerConfig::builder()
                 .training_baseline()

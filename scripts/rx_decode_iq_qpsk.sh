@@ -8,6 +8,7 @@ OUT_DIR="$ROOT/output"
 DURATION="4"
 WAV="$OUT_DIR/rx_capture_iq_qpsk.wav"
 LOG="acoustic_ofdm_mic_roundtrip_iq_qpsk.log"
+EQ_MODE="${EQ_MODE:-training-pilot}"
 
 mkdir -p "$OUT_DIR"
 rm -f \
@@ -32,12 +33,13 @@ cargo run -p acoustic_ofdm_cli -- \
   encode \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --carrier-freq 10000 \
+  --carrier-freq 7500 \
   --fs-baseband 16000 \
   --nfft 2048 \
   --ncp 1024 \
   --sync-half-len 2048 \
   --modulation qpsk \
+  --equalizer-mode "$EQ_MODE" \
   "$OUT_DIR/tx_packet_iq_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
 
@@ -45,12 +47,13 @@ cargo run -p acoustic_ofdm_cli -- \
   encode-body \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --carrier-freq 10000 \
+  --carrier-freq 7500 \
   --fs-baseband 16000 \
   --nfft 2048 \
   --ncp 1024 \
   --sync-half-len 2048 \
   --modulation qpsk \
+  --equalizer-mode "$EQ_MODE" \
   "$OUT_DIR/tx_symbols_only_iq_qpsk.wav" \
   ACOUSTIC-OFDM-ORACLE
 
@@ -70,12 +73,13 @@ cargo run -p acoustic_ofdm_cli -- \
   --profile live-debug \
   --fec-mode hamming74 \
   --passband-mode iq \
-  --carrier-freq 10000 \
+  --carrier-freq 7500 \
   --fs-baseband 16000 \
   --nfft 2048 \
   --ncp 1024 \
   --sync-half-len 2048 \
   --modulation qpsk \
+  --equalizer-mode "$EQ_MODE" \
   --duration-sec "$DURATION" \
   --mic-gain 0.6 \
   --spk-gain 0.6 \

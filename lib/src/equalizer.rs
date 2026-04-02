@@ -16,6 +16,7 @@ use crate::config::{EqualizerFeatures, Modulation, OfdmConfig};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EqualizerTrackingState {
     phase_line_hist: VecDeque<(f32, f32, f32)>,
+    residual_curve_est: Option<Vec<Complex32>>,
     next_symbol_time: f32,
     noise_var: Option<f32>,
 }
@@ -196,7 +197,7 @@ fn equalize_symbol_with_baseline(
 /// and applies both before a final common pilot normalization.
 fn equalize_symbol_with_pilots_instantaneous(
     cfg: &OfdmConfig,
-    state: &EqualizerTrackingState,
+    state: &mut EqualizerTrackingState,
     y: &[Complex32],
     used_bins: &[usize],
     pilot_bins: &[usize],
@@ -216,9 +217,11 @@ fn equalize_symbol_with_pilots_instantaneous(
         && !pilot_bins.is_empty()
         && !pref.is_empty()
     {
-        if let Some(residual_curve) =
-            pilot_residual_ifft_curve(cfg, &xeq_used, used_bins, pilot_bins, pref)
+        if let Some((residual_curve, residual_var)) =
+            pilot_residual_ifft_curve(&xeq_used, used_bins, pilot_bins, pref)
         {
+            let residual_curve =
+                temporal_ema_residual_curve(cfg, state, residual_curve, residual_var);
             for (z, corr) in xeq_used.iter_mut().zip(residual_curve.iter()) {
                 if corr.norm() > 1.0e-3 && corr.re.is_finite() && corr.im.is_finite() {
                     *z /= *corr;
@@ -735,22 +738,17 @@ fn smooth_real_line(x: &[f32]) -> Vec<f32> {
 }
 
 fn pilot_residual_ifft_curve(
-    cfg: &OfdmConfig,
     xeq_used: &[Complex32],
     used_bins: &[usize],
     pilot_bins: &[usize],
     pref: &[Complex32],
-) -> Option<Vec<Complex32>> {
-    let mut pts = Vec::<(usize, Complex32, f32)>::new();
+) -> Option<(Vec<Complex32>, f32)> {
+    let mut pts = Vec::<(usize, Complex32)>::new();
     for (k, pbin) in pilot_bins.iter().enumerate() {
         if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
             let ref_sym = pref[k];
             if ref_sym.norm_sqr() > 1.0e-9 {
-                pts.push((
-                    pos,
-                    xeq_used[pos] / ref_sym,
-                    pilot_weight(xeq_used[pos], ref_sym, cfg),
-                ));
+                pts.push((pos, xeq_used[pos] / ref_sym));
             }
         }
     }
@@ -758,6 +756,7 @@ fn pilot_residual_ifft_curve(
         return None;
     }
 
+    let noise_var = pilot_residual_noise_var(&pts);
     let mut curve = vec![Complex32::new(1.0, 0.0); used_bins.len()];
     for i in 0..curve.len() {
         if i <= pts[0].0 {
@@ -772,12 +771,10 @@ fn pilot_residual_ifft_curve(
         while seg + 1 < pts.len() && i > pts[seg + 1].0 {
             seg += 1;
         }
-        let (i0, z0, w0) = pts[seg];
-        let (i1, z1, w1) = pts[seg + 1];
+        let (i0, z0) = pts[seg];
+        let (i1, z1) = pts[seg + 1];
         let t = ((i - i0) as f32 / (i1 - i0).max(1) as f32).clamp(0.0, 1.0);
-        let zlin = z0 * (1.0 - t) + z1 * t;
-        let w = ((1.0 - t) * w0 + t * w1).clamp(0.1, 10.0);
-        curve[i] = Complex32::new(zlin.re * w, zlin.im * w);
+        curve[i] = z0 * (1.0 - t) + z1 * t;
     }
 
     let mut planner = FftPlanner::<f32>::new();
@@ -790,19 +787,101 @@ fn pilot_residual_ifft_curve(
         *v *= scale;
     }
 
-    let keep = 4usize.min(taps.len());
-    for tap in taps.iter_mut().skip(keep) {
-        *tap = Complex32::new(0.0, 0.0);
+    for tap in &mut taps {
+        let power = tap.norm_sqr();
+        let shrink = ((power - noise_var) / (power + 1.0e-9)).clamp(0.0, 1.0);
+        *tap *= shrink;
     }
 
     fft.process(&mut taps);
     for v in &mut taps {
         *v *= scale;
-        let mag = v.norm().clamp(0.5, 2.0);
+        let mag = v.norm().clamp(0.75, 1.5);
         let phase = v.arg();
         *v = Complex32::from_polar(mag, phase);
     }
-    Some(taps)
+    Some((taps, noise_var))
+}
+
+fn pilot_residual_noise_var(pts: &[(usize, Complex32)]) -> f32 {
+    if pts.len() < 3 {
+        return 5.0e-3;
+    }
+
+    let mut err_sum = 0.0f32;
+    let mut count = 0usize;
+    for win in pts.windows(3) {
+        let (i0, z0) = win[0];
+        let (i1, z1) = win[1];
+        let (i2, z2) = win[2];
+        let denom = (i2 - i0).max(1) as f32;
+        let t = ((i1 - i0) as f32 / denom).clamp(0.0, 1.0);
+        let pred = z0 * (1.0 - t) + z2 * t;
+        err_sum += (z1 - pred).norm_sqr();
+        count += 1;
+    }
+
+    if count == 0 {
+        5.0e-3
+    } else {
+        (err_sum / count as f32).clamp(1.0e-4, 2.5e-1)
+    }
+}
+
+fn temporal_ema_residual_curve(
+    cfg: &OfdmConfig,
+    state: &mut EqualizerTrackingState,
+    current: Vec<Complex32>,
+    _current_var: f32,
+) -> Vec<Complex32> {
+    if !cfg
+        .equalizer
+        .features
+        .contains(EqualizerFeatures::TEMPORAL_RESIDUAL_EMA)
+    {
+        return current;
+    }
+
+    let keep = cfg.equalizer.temporal_window.max(1);
+    if keep <= 1 {
+        state.residual_curve_est = Some(current.clone());
+        return current;
+    }
+
+    let alpha = (1.0 / keep as f32).clamp(0.05, 1.0);
+    let fused = match &state.residual_curve_est {
+        Some(prev) if prev.len() == current.len() => {
+            let phase_align = common_phase_delta(prev, &current);
+            let rot = Complex32::from_polar(1.0, -phase_align);
+            let mut out = current.clone();
+            for ((dst, p), c) in out.iter_mut().zip(prev.iter()).zip(current.iter()) {
+                let c_aligned = *c * rot;
+                *dst = c_aligned * alpha + *p * (1.0 - alpha);
+            }
+            out
+        }
+        _ => current.clone(),
+    };
+    state.residual_curve_est = Some(fused.clone());
+    fused
+}
+
+fn common_phase_delta(reference: &[Complex32], current: &[Complex32]) -> f32 {
+    let mut acc = Complex32::new(0.0, 0.0);
+    for (r, c) in reference.iter().zip(current.iter()) {
+        let rn = r.norm();
+        let cn = c.norm();
+        if rn > 1.0e-6 && cn > 1.0e-6 {
+            let ru = *r / rn;
+            let cu = *c / cn;
+            acc += cu * ru.conj();
+        }
+    }
+    if acc.norm() > 1.0e-9 {
+        acc.arg()
+    } else {
+        0.0
+    }
 }
 
 // vim: set ts=4 sw=4 et:

@@ -424,6 +424,10 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.pll_freq_hist = [];
     dbg.pll_err_hist = [];
     dbg.pilot_gain_hist = [];
+    dbg.eq_mode = equalizer_mode_name(p);
+    dbg.residual_order_hist = [];
+    dbg.residual_var_hist = [];
+    eq_state = ofdm_equalizer_init_state();
     for i = 1:max_data_ofdm
         s0 = data_start + (i-1)*sym_len;
         s1 = s0 + sym_len - 1;
@@ -434,17 +438,18 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
         rt = rt(p.Ncp+1:end);
         Y = fft(rt, p.Nfft);
         Xraw_used = Y(used_bins);
-        Xeq_used = Xraw_used ./ Hest;
         if has_pilot
             pref = known_pilot_symbols(numel(pilot_bins), i);
-            prx = Xeq_used(pilot_pos);
-            g = sum(prx .* conj(pref)) / (sum(abs(pref).^2) + 1e-12);
-            if isfinite(g) && abs(g) > 1e-12
-                Xeq_used = Xeq_used / g;
-            else
-                g = 1;
+            [Xeq_used, eq_state, eq_dbg] = ofdm_equalize_symbol(Xraw_used, Hest, used_bins, pilot_bins, pref, p, eq_state);
+            dbg.pilot_gain_hist(end+1, 1) = eq_dbg.pilot_gain; %#ok<AGROW>
+            if isfield(eq_dbg, 'selected_order') && ~isempty(eq_dbg.selected_order)
+                dbg.residual_order_hist(end+1, 1) = eq_dbg.selected_order; %#ok<AGROW>
             end
-            dbg.pilot_gain_hist(end+1, 1) = g; %#ok<AGROW>
+            if isfield(eq_dbg, 'residual_var') && ~isempty(eq_dbg.residual_var)
+                dbg.residual_var_hist(end+1, 1) = eq_dbg.residual_var; %#ok<AGROW>
+            end
+        else
+            Xeq_used = Xraw_used ./ Hest;
         end
         Xraw = Xraw_used(data_pos);
         Xeq = Xeq_used(data_pos);
@@ -480,6 +485,13 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.rx_syms_eq = dbg.rx_syms_eq(1:min(num_used_syms, numel(dbg.rx_syms_eq)));
     consumed_bb = (sync_start - 1) + xsync_len + train_len + used_ofdm * sym_len;
     ok = true;
+end
+
+function mode = equalizer_mode_name(p)
+    mode = 'training-pilot';
+    if isfield(p, 'equalizer_mode') && ~isempty(p.equalizer_mode)
+        mode = char(p.equalizer_mode);
+    end
 end
 
 function s = known_sync_half(L)
@@ -768,6 +780,11 @@ function p = default_params()
     p.num_pilots = [];
     p.modulation = 'BPSK';
     p.use_pilots = [];
+    p.equalizer_mode = 'training-pilot';
+    p.temporal_window = 4;
+    p.residual_tap_order_mode = 'all';
+    p.residual_tap_order = 1;
+    p.residual_tap_order_max = 7;
     p.wake_ms = 12;
     p.wake_freq = 16500;
     p.wake_guard_ms = 4;

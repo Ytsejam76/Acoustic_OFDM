@@ -1,11 +1,12 @@
 // Copyright (c) 2026 Elias S. G. Carotti
 
 use std::collections::VecDeque;
+use std::f32::consts::PI;
 
 use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 
-use crate::config::{EqualizerFeatures, Modulation, OfdmConfig};
+use crate::config::{EqualizerFeatures, Modulation, OfdmConfig, ResidualTapOrderMode};
 
 /// Packet-local equalizer tracking state.
 ///
@@ -218,7 +219,7 @@ fn equalize_symbol_with_pilots_instantaneous(
         && !pref.is_empty()
     {
         if let Some((residual_curve, residual_var)) =
-            pilot_residual_ifft_curve(&xeq_used, used_bins, pilot_bins, pref)
+            pilot_residual_ifft_curve_with_cfg(cfg, &xeq_used, used_bins, pilot_bins, pref)
         {
             let residual_curve =
                 temporal_ema_residual_curve(cfg, state, residual_curve, residual_var);
@@ -737,12 +738,74 @@ fn smooth_real_line(x: &[f32]) -> Vec<f32> {
     out
 }
 
-fn pilot_residual_ifft_curve(
+fn pilot_residual_ifft_curve_with_cfg(
+    cfg: &OfdmConfig,
     xeq_used: &[Complex32],
     used_bins: &[usize],
     pilot_bins: &[usize],
     pref: &[Complex32],
 ) -> Option<(Vec<Complex32>, f32)> {
+    let pts = pilot_residual_points(xeq_used, used_bins, pilot_bins, pref);
+    if pts.len() < 2 {
+        return None;
+    }
+
+    let noise_var = pilot_residual_noise_var(&pts);
+    let selected_order = match cfg.equalizer.residual_tap_order_mode {
+        ResidualTapOrderMode::All => None,
+        ResidualTapOrderMode::Fixed => Some(
+            cfg.equalizer
+                .residual_tap_order
+                .max(1)
+                .min(used_bins.len())
+                .min(pts.len()),
+        ),
+        ResidualTapOrderMode::Mdl => Some(select_delay_tap_order_mdl(
+            &pts,
+            used_bins.len(),
+            cfg.equalizer.residual_tap_order_max,
+        )?),
+    };
+
+    let mut taps = match selected_order {
+        None => {
+            let curve = interpolate_residual_curve(&pts, used_bins.len());
+            let mut taps = curve.clone();
+            unitary_ifft_in_place(&mut taps);
+            taps
+        }
+        Some(order) => fit_delay_taps_least_squares(&pts, used_bins.len(), order)?,
+    };
+
+    if let Some(keep) = selected_order {
+        let keep = keep.min(taps.len()).min(pts.len());
+        for tap in taps.iter_mut().skip(keep) {
+            *tap = Complex32::new(0.0, 0.0);
+        }
+    }
+
+    for tap in taps.iter_mut() {
+        let power = tap.norm_sqr();
+        let shrink = ((power - noise_var) / (power + 1.0e-9)).clamp(0.0, 1.0);
+        *tap *= shrink;
+    }
+
+    let mut curve = taps.clone();
+    unitary_fft_in_place(&mut curve);
+    for v in &mut curve {
+        let mag = v.norm().clamp(0.75, 1.5);
+        let phase = v.arg();
+        *v = Complex32::from_polar(mag, phase);
+    }
+    Some((curve, noise_var))
+}
+
+fn pilot_residual_points(
+    xeq_used: &[Complex32],
+    used_bins: &[usize],
+    pilot_bins: &[usize],
+    pref: &[Complex32],
+) -> Vec<(usize, Complex32)> {
     let mut pts = Vec::<(usize, Complex32)>::new();
     for (k, pbin) in pilot_bins.iter().enumerate() {
         if let Some(pos) = used_bins.iter().position(|b| b == pbin) {
@@ -752,12 +815,11 @@ fn pilot_residual_ifft_curve(
             }
         }
     }
-    if pts.len() < 2 {
-        return None;
-    }
+    pts
+}
 
-    let noise_var = pilot_residual_noise_var(&pts);
-    let mut curve = vec![Complex32::new(1.0, 0.0); used_bins.len()];
+fn interpolate_residual_curve(pts: &[(usize, Complex32)], curve_len: usize) -> Vec<Complex32> {
+    let mut curve = vec![Complex32::new(1.0, 0.0); curve_len];
     for i in 0..curve.len() {
         if i <= pts[0].0 {
             curve[i] = pts[0].1;
@@ -776,31 +838,179 @@ fn pilot_residual_ifft_curve(
         let t = ((i - i0) as f32 / (i1 - i0).max(1) as f32).clamp(0.0, 1.0);
         curve[i] = z0 * (1.0 - t) + z1 * t;
     }
+    curve
+}
 
+/// Fits a leading-tap residual channel model directly in pilot space.
+///
+/// Rationale:
+/// The pilot residual denoiser lives in a delay-domain basis, so model-order
+/// selection should evaluate candidate tap counts in that same basis rather
+/// than after a heuristic interpolation step.
+fn fit_delay_taps_least_squares(
+    pts: &[(usize, Complex32)],
+    curve_len: usize,
+    order: usize,
+) -> Option<Vec<Complex32>> {
+    if pts.is_empty() || curve_len == 0 {
+        return None;
+    }
+
+    let order = order.max(1).min(curve_len).min(pts.len());
+    let mut gram = vec![vec![Complex32::new(0.0, 0.0); order]; order];
+    let mut rhs = vec![Complex32::new(0.0, 0.0); order];
+    for &(pos, obs) in pts {
+        let basis = delay_basis_row(curve_len, pos, order);
+        for i in 0..order {
+            rhs[i] += basis[i].conj() * obs;
+            for j in 0..order {
+                gram[i][j] += basis[i].conj() * basis[j];
+            }
+        }
+    }
+    for (i, row) in gram.iter_mut().enumerate() {
+        row[i] += Complex32::new(1.0e-6, 0.0);
+    }
+
+    let sol = solve_complex_linear_system(gram, rhs)?;
+    let mut taps = vec![Complex32::new(0.0, 0.0); curve_len];
+    for (tap, value) in taps.iter_mut().zip(sol.iter()) {
+        *tap = *value;
+    }
+    Some(taps)
+}
+
+fn select_delay_tap_order_mdl(
+    pts: &[(usize, Complex32)],
+    curve_len: usize,
+    max_order: usize,
+) -> Option<usize> {
+    if pts.is_empty() || curve_len == 0 {
+        return None;
+    }
+
+    let sample_count = (2 * pts.len()).max(1) as f32;
+    let max_order = max_order.max(1).min(curve_len).min(pts.len());
+    let mut best_order = 1usize;
+    let mut best_score = f32::INFINITY;
+    for order in 1..=max_order {
+        let taps = fit_delay_taps_least_squares(pts, curve_len, order)?;
+        let mse = delay_tap_fit_mse(pts, curve_len, &taps).clamp(1.0e-6, 1.0e3);
+        let n_params = 2.0 * order as f32;
+        let score = sample_count * mse.ln() + n_params * sample_count.ln();
+        if score < best_score {
+            best_score = score;
+            best_order = order;
+        }
+    }
+    Some(best_order)
+}
+
+fn delay_tap_fit_mse(pts: &[(usize, Complex32)], curve_len: usize, taps: &[Complex32]) -> f32 {
+    if pts.is_empty() {
+        return 1.0;
+    }
+
+    let mut err = 0.0f32;
+    for &(pos, obs) in pts {
+        let est = synthesize_delay_response_at(curve_len, taps, pos);
+        err += (obs - est).norm_sqr();
+    }
+    err / pts.len() as f32
+}
+
+fn delay_basis_row(curve_len: usize, pos: usize, order: usize) -> Vec<Complex32> {
+    let scale = 1.0 / (curve_len as f32).sqrt();
+    (0..order)
+        .map(|tap| {
+            let phase = -2.0 * PI * (pos as f32) * (tap as f32) / curve_len as f32;
+            Complex32::from_polar(scale, phase)
+        })
+        .collect()
+}
+
+fn synthesize_delay_response_at(curve_len: usize, taps: &[Complex32], pos: usize) -> Complex32 {
+    let scale = 1.0 / (curve_len as f32).sqrt();
+    taps.iter()
+        .enumerate()
+        .fold(Complex32::new(0.0, 0.0), |acc, (tap, value)| {
+            let phase = -2.0 * PI * (pos as f32) * (tap as f32) / curve_len as f32;
+            acc + *value * Complex32::from_polar(scale, phase)
+        })
+}
+
+fn solve_complex_linear_system(
+    mut a: Vec<Vec<Complex32>>,
+    mut b: Vec<Complex32>,
+) -> Option<Vec<Complex32>> {
+    let n = b.len();
+    for i in 0..n {
+        let mut pivot = i;
+        let mut pivot_norm = a[i][i].norm_sqr();
+        for (row_idx, row) in a.iter().enumerate().skip(i + 1) {
+            let cand = row[i].norm_sqr();
+            if cand > pivot_norm {
+                pivot = row_idx;
+                pivot_norm = cand;
+            }
+        }
+        if pivot_norm <= 1.0e-12 {
+            return None;
+        }
+        if pivot != i {
+            a.swap(i, pivot);
+            b.swap(i, pivot);
+        }
+
+        let diag = a[i][i];
+        for col in i..n {
+            a[i][col] /= diag;
+        }
+        b[i] /= diag;
+
+        let pivot_row = a[i].clone();
+        let pivot_rhs = b[i];
+        for row in 0..n {
+            if row == i {
+                continue;
+            }
+            let factor = a[row][i];
+            if factor.norm_sqr() <= 1.0e-18 {
+                continue;
+            }
+            for col in i..n {
+                a[row][col] -= factor * pivot_row[col];
+            }
+            b[row] -= factor * pivot_rhs;
+        }
+    }
+    Some(b)
+}
+
+fn unitary_fft_in_place(x: &mut [Complex32]) {
+    if x.is_empty() {
+        return;
+    }
     let mut planner = FftPlanner::<f32>::new();
-    let ifft = planner.plan_fft_inverse(curve.len());
-    let fft = planner.plan_fft_forward(curve.len());
-    let mut taps = curve.clone();
-    ifft.process(&mut taps);
-    let scale = 1.0 / (curve.len() as f32).sqrt();
-    for v in &mut taps {
+    let fft = planner.plan_fft_forward(x.len());
+    fft.process(x);
+    let scale = 1.0 / (x.len() as f32).sqrt();
+    for v in x {
         *v *= scale;
     }
+}
 
-    for tap in &mut taps {
-        let power = tap.norm_sqr();
-        let shrink = ((power - noise_var) / (power + 1.0e-9)).clamp(0.0, 1.0);
-        *tap *= shrink;
+fn unitary_ifft_in_place(x: &mut [Complex32]) {
+    if x.is_empty() {
+        return;
     }
-
-    fft.process(&mut taps);
-    for v in &mut taps {
+    let mut planner = FftPlanner::<f32>::new();
+    let ifft = planner.plan_fft_inverse(x.len());
+    ifft.process(x);
+    let scale = 1.0 / (x.len() as f32).sqrt();
+    for v in x {
         *v *= scale;
-        let mag = v.norm().clamp(0.75, 1.5);
-        let phase = v.arg();
-        *v = Complex32::from_polar(mag, phase);
     }
-    Some((taps, noise_var))
 }
 
 fn pilot_residual_noise_var(pts: &[(usize, Complex32)]) -> f32 {
@@ -881,6 +1091,50 @@ fn common_phase_delta(reference: &[Complex32], current: &[Complex32]) -> f32 {
         acc.arg()
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthesize_points(
+        curve_len: usize,
+        taps: &[Complex32],
+        pilot_pos: &[usize],
+    ) -> Vec<(usize, Complex32)> {
+        pilot_pos
+            .iter()
+            .map(|&pos| (pos, synthesize_delay_response_at(curve_len, taps, pos)))
+            .collect()
+    }
+
+    #[test]
+    fn mdl_prefers_two_tap_model_when_data_is_two_tap() {
+        let curve_len = 8usize;
+        let pilot_pos = [0usize, 1, 2, 4, 5, 6, 7];
+        let mut taps = vec![Complex32::new(0.0, 0.0); curve_len];
+        taps[0] = Complex32::new(1.0, 0.0);
+        taps[1] = Complex32::new(0.2, -0.15);
+        let pts = synthesize_points(curve_len, &taps, &pilot_pos);
+
+        let order = select_delay_tap_order_mdl(&pts, curve_len, 6).expect("mdl order");
+        assert_eq!(order, 2);
+    }
+
+    #[test]
+    fn least_squares_delay_fit_matches_pilot_observations() {
+        let curve_len = 8usize;
+        let pilot_pos = [0usize, 2, 3, 4, 6, 7];
+        let mut taps = vec![Complex32::new(0.0, 0.0); curve_len];
+        taps[0] = Complex32::new(1.0, 0.0);
+        taps[1] = Complex32::new(-0.1, 0.25);
+        taps[2] = Complex32::new(0.05, -0.08);
+        let pts = synthesize_points(curve_len, &taps, &pilot_pos);
+
+        let fit = fit_delay_taps_least_squares(&pts, curve_len, 3).expect("ls fit");
+        let mse = delay_tap_fit_mse(&pts, curve_len, &fit);
+        assert!(mse < 1.0e-8, "mse={mse}");
     }
 }
 

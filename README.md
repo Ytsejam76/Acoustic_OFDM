@@ -95,6 +95,18 @@ Common outputs include:
 
 For live work, `mic-roundtrip` is the main path. It uses known scheduled burst times and oracle packet expectations; wake/coarse search is not the current focus.
 
+### Equalizer notes
+
+The IQ/QPSK live path currently experiments with several equalizer variants,
+including pilot-residual delay-domain denoising.
+
+The `pilot-denoise-mdl` mode uses the
+[Minimum Description Length (MDL)](https://en.wikipedia.org/wiki/Minimum_description_length)
+principle to choose the residual delay-domain model order. Its purpose is to
+keep the residual channel model only as complex as needed to explain the pilot
+observations, avoiding both underfitting short multipath structure and
+overfitting pilot noise with unnecessary delay taps.
+
 ### WAV commands
 
 Encode payload to WAV:

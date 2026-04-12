@@ -67,6 +67,22 @@ impl std::ops::BitOrAssign for EqualizerFeatures {
     }
 }
 
+/// Delay-domain model-order policy for pilot residual denoising.
+///
+/// Rationale:
+/// The pilot residual denoiser operates on a delay-domain tap model. This
+/// policy determines whether it keeps every tap, uses a fixed tap count, or
+/// selects the order adaptively with an MDL criterion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidualTapOrderMode {
+    /// Keep every delay tap and rely only on shrinkage.
+    All,
+    /// Keep a fixed number of leading delay taps.
+    Fixed,
+    /// Select the number of leading delay taps with MDL.
+    Mdl,
+}
+
 /// Equalizer subsystem configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EqualizerConfig {
@@ -74,6 +90,12 @@ pub struct EqualizerConfig {
     pub features: EqualizerFeatures,
     /// Number of recent symbols used by temporal least-squares tracking.
     pub temporal_window: usize,
+    /// Policy used to choose the residual delay-domain model order.
+    pub residual_tap_order_mode: ResidualTapOrderMode,
+    /// Fixed residual delay-domain tap count when fixed-order selection is used.
+    pub residual_tap_order: usize,
+    /// Maximum residual delay-domain tap count considered by adaptive selection.
+    pub residual_tap_order_max: usize,
 }
 
 impl EqualizerConfig {
@@ -99,10 +121,13 @@ impl Default for EqualizerConfig {
 /// Rationale:
 /// The equalizer now consists of composable stages. The builder keeps call
 /// sites readable while still compiling down to simple feature checks.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct EqualizerBuilder {
     features: EqualizerFeatures,
     temporal_window: usize,
+    residual_tap_order_mode: ResidualTapOrderMode,
+    residual_tap_order: usize,
+    residual_tap_order_max: usize,
 }
 
 impl EqualizerBuilder {
@@ -156,11 +181,43 @@ impl EqualizerBuilder {
         self
     }
 
+    /// Use a fixed residual delay-domain tap count in pilot IFFT denoising.
+    pub fn residual_tap_order(mut self, order: usize) -> Self {
+        self.residual_tap_order_mode = ResidualTapOrderMode::Fixed;
+        self.residual_tap_order = order.max(1);
+        self.residual_tap_order_max = self.residual_tap_order_max.max(order.max(1));
+        self
+    }
+
+    /// Select the residual delay-domain tap count with an MDL criterion.
+    pub fn residual_tap_order_mdl(mut self, max_order: usize) -> Self {
+        self.residual_tap_order_mode = ResidualTapOrderMode::Mdl;
+        self.residual_tap_order_max = max_order.max(1);
+        self
+    }
+
     /// Finalize the equalizer configuration.
     pub fn build(self) -> EqualizerConfig {
         EqualizerConfig {
             features: self.features,
             temporal_window: self.temporal_window.max(1),
+            residual_tap_order_mode: self.residual_tap_order_mode,
+            residual_tap_order: self.residual_tap_order.max(1),
+            residual_tap_order_max: self
+                .residual_tap_order_max
+                .max(self.residual_tap_order.max(1)),
+        }
+    }
+}
+
+impl Default for EqualizerBuilder {
+    fn default() -> Self {
+        Self {
+            features: EqualizerFeatures::NONE,
+            temporal_window: 1,
+            residual_tap_order_mode: ResidualTapOrderMode::All,
+            residual_tap_order: 1,
+            residual_tap_order_max: 1,
         }
     }
 }

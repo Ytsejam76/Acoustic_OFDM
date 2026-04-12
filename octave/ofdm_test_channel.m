@@ -261,6 +261,62 @@ function fig_handles = make_plots(tx_audio, rx_audio, dbg, p)
         plot(real(ideal), imag(ideal), 'ro', 'markersize', 10, 'linewidth', 2);
         hold off;
     end
+
+    has_pre = isfield(dbg, 'delay_taps_pre_denoise') && ~isempty(dbg.delay_taps_pre_denoise);
+    has_post = isfield(dbg, 'delay_taps_post_denoise') && ~isempty(dbg.delay_taps_post_denoise);
+    if has_pre || has_post
+        fig_handles(end+1) = figure('name', 'impulse_response_denoise_compare');
+        if has_pre
+            subplot(2,1,1);
+            stem(0:numel(dbg.delay_taps_pre_denoise)-1, abs(dbg.delay_taps_pre_denoise), 'filled');
+            grid on;
+            xlabel('Delay tap');
+            ylabel('Magnitude');
+            title('Residual impulse response before denoise');
+        end
+        if has_post
+            subplot(2,1,2);
+            stem(0:numel(dbg.delay_taps_post_denoise)-1, abs(dbg.delay_taps_post_denoise), 'filled');
+            grid on;
+            xlabel('Delay tap');
+            ylabel('Magnitude');
+            title('Residual impulse response after denoise');
+        end
+    end
+
+    if isfield(dbg, 'wiener_dbg') && ~isempty(fieldnames(dbg.wiener_dbg))
+        fig_handles(end+1) = figure('name', 'wiener_tap_diagnostics');
+        if isfield(dbg.wiener_dbg, 'tap_history') && ~isempty(dbg.wiener_dbg.tap_history)
+            subplot(3,1,1);
+            stem(0:numel(dbg.wiener_dbg.tap_history)-1, abs(dbg.wiener_dbg.tap_history), 'filled');
+            grid on;
+            xlabel('History lag');
+            ylabel('|tap|');
+            title(sprintf('Wiener tap history (tap %d)', dbg.wiener_dbg.tap_index));
+        end
+        if isfield(dbg.wiener_dbg, 'ryy') && ~isempty(dbg.wiener_dbg.ryy)
+            subplot(3,1,2);
+            stem(0:numel(dbg.wiener_dbg.ryy)-1, real(dbg.wiener_dbg.ryy), 'filled');
+            hold on;
+            if isfield(dbg.wiener_dbg, 'rhh') && ~isempty(dbg.wiener_dbg.rhh)
+                stem(0:numel(dbg.wiener_dbg.rhh)-1, real(dbg.wiener_dbg.rhh), 'r');
+            end
+            hold off;
+            grid on;
+            xlabel('Lag');
+            ylabel('Correlation');
+            title('Estimated autocorrelation sequences');
+            legend('Ryy', 'Rhh', 'location', 'northeast');
+        end
+        if isfield(dbg.wiener_dbg, 'weights') && ~isempty(dbg.wiener_dbg.weights)
+            subplot(3,1,3);
+            stem(0:numel(dbg.wiener_dbg.weights)-1, real(dbg.wiener_dbg.weights), 'filled');
+            grid on;
+            xlabel('History lag');
+            ylabel('Weight');
+            title('Wiener weights (real part)');
+        end
+    end
 end
 
 function ensure_out_dir(out_dir)

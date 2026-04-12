@@ -117,6 +117,11 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
     best_sync = 0;
     best_ci = 0;
     best_cfo = 0;
+    fallback_dbg_try = struct();
+    fallback_sync = 0;
+    fallback_ci = 0;
+    fallback_cfo = 0;
+    fallback_score = -Inf;
 
     for ci = 1:numel(sync_cands)
         sync_start = sync_cands(ci);
@@ -138,8 +143,15 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
         for cfi = 1:numel(cfo_list)
             cfo_try = cfo_list(cfi);
             [ok_try, pkt_try, consumed_bb, dbg_try] = try_decode_from_sync(rbb, sync_start, cfo_try, p);
+            score = sync_scores(min(ci, numel(sync_scores))) / (1 + abs(cfo_try) / max(max_cfo_hz, 1));
+            if ~isempty(fieldnames(dbg_try)) && score > fallback_score
+                fallback_dbg_try = dbg_try;
+                fallback_sync = sync_start;
+                fallback_ci = ci;
+                fallback_cfo = cfo_try;
+                fallback_score = score;
+            end
             if ok_try
-                score = sync_scores(min(ci, numel(sync_scores))) / (1 + abs(cfo_try) / max(max_cfo_hz, 1));
                 if score > best_score
                     best_found = true;
                     best_score = score;
@@ -170,6 +182,101 @@ function [ok, pkt_info, consumed, dbg] = rx_one_packet(rx_segment, p)
         dbg.pll_phase_hist = best_dbg_try.pll_phase_hist;
         dbg.pll_freq_hist = best_dbg_try.pll_freq_hist;
         dbg.pll_err_hist = best_dbg_try.pll_err_hist;
+        if isfield(best_dbg_try, 'pilot_gain_hist')
+            dbg.pilot_gain_hist = best_dbg_try.pilot_gain_hist;
+        end
+        if isfield(best_dbg_try, 'eq_mode')
+            dbg.eq_mode = best_dbg_try.eq_mode;
+        end
+        if isfield(best_dbg_try, 'residual_order_hist')
+            dbg.residual_order_hist = best_dbg_try.residual_order_hist;
+        end
+        if isfield(best_dbg_try, 'residual_var_hist')
+            dbg.residual_var_hist = best_dbg_try.residual_var_hist;
+        end
+        if isfield(best_dbg_try, 'wiener_window_used')
+            dbg.wiener_window_used = best_dbg_try.wiener_window_used;
+        end
+        if isfield(best_dbg_try, 'wiener_dbg')
+            dbg.wiener_dbg = best_dbg_try.wiener_dbg;
+        end
+        if isfield(best_dbg_try, 'wiener_noise_var_training')
+            dbg.wiener_noise_var_training = best_dbg_try.wiener_noise_var_training;
+        end
+        if isfield(best_dbg_try, 'wiener_noise_var_cp')
+            dbg.wiener_noise_var_cp = best_dbg_try.wiener_noise_var_cp;
+        end
+        if isfield(best_dbg_try, 'wiener_noise_var_packet')
+            dbg.wiener_noise_var_packet = best_dbg_try.wiener_noise_var_packet;
+        end
+        if isfield(best_dbg_try, 'delay_taps_pre_denoise')
+            dbg.delay_taps_pre_denoise = best_dbg_try.delay_taps_pre_denoise;
+        end
+        if isfield(best_dbg_try, 'delay_taps_post_denoise')
+            dbg.delay_taps_post_denoise = best_dbg_try.delay_taps_post_denoise;
+        end
+    elseif ~isempty(fieldnames(fallback_dbg_try))
+        dbg.cfo_est_hz = fallback_cfo;
+        dbg.sync_candidate_used = fallback_ci;
+        dbg.peak_idx = fallback_sync;
+        dbg.rbb_cfo = fallback_dbg_try.rbb_cfo;
+        if isfield(fallback_dbg_try, 'Hest')
+            dbg.Hest = fallback_dbg_try.Hest;
+        end
+        if isfield(fallback_dbg_try, 'train_rx_raw')
+            dbg.train_rx_raw = fallback_dbg_try.train_rx_raw;
+        end
+        if isfield(fallback_dbg_try, 'train_rx_eq')
+            dbg.train_rx_eq = fallback_dbg_try.train_rx_eq;
+        end
+        if isfield(fallback_dbg_try, 'rx_syms_raw')
+            dbg.rx_syms_raw = fallback_dbg_try.rx_syms_raw;
+        end
+        if isfield(fallback_dbg_try, 'rx_syms_eq')
+            dbg.rx_syms_eq = fallback_dbg_try.rx_syms_eq;
+        end
+        if isfield(fallback_dbg_try, 'pll_phase_hist')
+            dbg.pll_phase_hist = fallback_dbg_try.pll_phase_hist;
+        end
+        if isfield(fallback_dbg_try, 'pll_freq_hist')
+            dbg.pll_freq_hist = fallback_dbg_try.pll_freq_hist;
+        end
+        if isfield(fallback_dbg_try, 'pll_err_hist')
+            dbg.pll_err_hist = fallback_dbg_try.pll_err_hist;
+        end
+        if isfield(fallback_dbg_try, 'pilot_gain_hist')
+            dbg.pilot_gain_hist = fallback_dbg_try.pilot_gain_hist;
+        end
+        if isfield(fallback_dbg_try, 'eq_mode')
+            dbg.eq_mode = fallback_dbg_try.eq_mode;
+        end
+        if isfield(fallback_dbg_try, 'residual_order_hist')
+            dbg.residual_order_hist = fallback_dbg_try.residual_order_hist;
+        end
+        if isfield(fallback_dbg_try, 'residual_var_hist')
+            dbg.residual_var_hist = fallback_dbg_try.residual_var_hist;
+        end
+        if isfield(fallback_dbg_try, 'wiener_window_used')
+            dbg.wiener_window_used = fallback_dbg_try.wiener_window_used;
+        end
+        if isfield(fallback_dbg_try, 'wiener_dbg')
+            dbg.wiener_dbg = fallback_dbg_try.wiener_dbg;
+        end
+        if isfield(fallback_dbg_try, 'wiener_noise_var_training')
+            dbg.wiener_noise_var_training = fallback_dbg_try.wiener_noise_var_training;
+        end
+        if isfield(fallback_dbg_try, 'wiener_noise_var_cp')
+            dbg.wiener_noise_var_cp = fallback_dbg_try.wiener_noise_var_cp;
+        end
+        if isfield(fallback_dbg_try, 'wiener_noise_var_packet')
+            dbg.wiener_noise_var_packet = fallback_dbg_try.wiener_noise_var_packet;
+        end
+        if isfield(fallback_dbg_try, 'delay_taps_pre_denoise')
+            dbg.delay_taps_pre_denoise = fallback_dbg_try.delay_taps_pre_denoise;
+        end
+        if isfield(fallback_dbg_try, 'delay_taps_post_denoise')
+            dbg.delay_taps_post_denoise = fallback_dbg_try.delay_taps_post_denoise;
+        end
     end
 end
 
@@ -390,7 +497,6 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.Hest = Hest;
     dbg.train_rx_raw = Ytrain(used_bins);
     dbg.train_rx_eq = Ytrain(used_bins) ./ Hest;
-
     data_start = train_end + 1;
     max_payload_bytes = p.packet_payload_bytes + 16;
     max_bits = max_payload_bytes * 8;
@@ -405,6 +511,21 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     if max_data_ofdm <= 0
         return;
     end
+
+    train_noise_var = estimate_training_noise_var(Ytrain, used_bins, p);
+    cp_noise_var = estimate_cp_noise_var(rbb_cfo, train_start, max_data_ofdm + 1, p);
+    p.wiener_noise_var_training = train_noise_var;
+    p.wiener_noise_var_cp = cp_noise_var;
+    if isfinite(train_noise_var) && train_noise_var > 0
+        p.wiener_noise_var_packet = train_noise_var;
+    elseif isfinite(cp_noise_var) && cp_noise_var > 0
+        p.wiener_noise_var_packet = cp_noise_var;
+    else
+        p.wiener_noise_var_packet = [];
+    end
+    dbg.wiener_noise_var_training = train_noise_var;
+    dbg.wiener_noise_var_cp = cp_noise_var;
+    dbg.wiener_noise_var_packet = p.wiener_noise_var_packet;
 
     rx_syms = [];
     dbg.rx_syms_raw = [];
@@ -427,6 +548,10 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.eq_mode = equalizer_mode_name(p);
     dbg.residual_order_hist = [];
     dbg.residual_var_hist = [];
+    dbg.delay_taps_pre_denoise = [];
+    dbg.delay_taps_post_denoise = [];
+    dbg.wiener_window_used = [];
+    dbg.wiener_dbg = struct();
     eq_state = ofdm_equalizer_init_state();
     for i = 1:max_data_ofdm
         s0 = data_start + (i-1)*sym_len;
@@ -447,6 +572,18 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
             end
             if isfield(eq_dbg, 'residual_var') && ~isempty(eq_dbg.residual_var)
                 dbg.residual_var_hist(end+1, 1) = eq_dbg.residual_var; %#ok<AGROW>
+            end
+            if isfield(eq_dbg, 'delay_taps_pre_denoise') && ~isempty(eq_dbg.delay_taps_pre_denoise)
+                dbg.delay_taps_pre_denoise = eq_dbg.delay_taps_pre_denoise;
+            end
+            if isfield(eq_dbg, 'delay_taps_post_denoise') && ~isempty(eq_dbg.delay_taps_post_denoise)
+                dbg.delay_taps_post_denoise = eq_dbg.delay_taps_post_denoise;
+            end
+            if isfield(eq_dbg, 'wiener_window_used') && ~isempty(eq_dbg.wiener_window_used)
+                dbg.wiener_window_used = eq_dbg.wiener_window_used;
+            end
+            if isfield(eq_dbg, 'wiener_dbg') && ~isempty(fieldnames(eq_dbg.wiener_dbg))
+                dbg.wiener_dbg = eq_dbg.wiener_dbg;
             end
         else
             Xeq_used = Xraw_used ./ Hest;
@@ -485,6 +622,39 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.rx_syms_eq = dbg.rx_syms_eq(1:min(num_used_syms, numel(dbg.rx_syms_eq)));
     consumed_bb = (sync_start - 1) + xsync_len + train_len + used_ofdm * sym_len;
     ok = true;
+end
+
+function noise_var = estimate_training_noise_var(Ytrain, used_bins, p)
+    pos_bins = 2:(floor(p.Nfft / 2) - 1);
+    noise_bins = setdiff(pos_bins, used_bins, 'stable');
+    if isempty(noise_bins)
+        noise_var = NaN;
+        return;
+    end
+    noise_var = mean(abs(Ytrain(noise_bins)).^2) / max(1, p.Nfft);
+end
+
+function noise_var = estimate_cp_noise_var(rbb_cfo, train_start, max_symbols, p)
+    sym_len = p.Nfft + p.Ncp;
+    err_sum = 0;
+    count = 0;
+    for si = 0:max_symbols
+        s0 = train_start + si * sym_len;
+        s1 = s0 + sym_len - 1;
+        if s1 > length(rbb_cfo)
+            break;
+        end
+        rsym = rbb_cfo(s0:s1);
+        cp = rsym(1:p.Ncp);
+        tail = rsym(end-p.Ncp+1:end);
+        err_sum = err_sum + mean(abs(cp - tail).^2);
+        count = count + 1;
+    end
+    if count == 0
+        noise_var = NaN;
+    else
+        noise_var = 0.5 * err_sum / count;
+    end
 end
 
 function mode = equalizer_mode_name(p)

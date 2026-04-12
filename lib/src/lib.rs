@@ -23,7 +23,7 @@ pub use baseband::{
 };
 pub use config::{
     EqualizerBuilder, EqualizerConfig, EqualizerFeatures, FecMode, Modulation, OfdmConfig,
-    PassbandMode, WakePreamble,
+    PassbandMode, ResidualTapOrderMode, WakePreamble,
 };
 pub use debug::{
     dump_passband_bins, dump_passband_bins_with_sync, dump_passband_channel_compare_with_sync,

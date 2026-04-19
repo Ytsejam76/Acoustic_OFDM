@@ -53,6 +53,12 @@ function [result, dbg, tx_audio, rx_audio, payload, p] = ofdm_test_channel(varar
         else
             fprintf('Echoes: disabled\n');
         end
+        if isfield(p, 'interference_file') && ~isempty(p.interference_file)
+            fprintf('Recorded interference: %s\n', char(p.interference_file));
+            fprintf('Interference ratio: %.1f dB\n', selected_interference_ratio_db(p));
+        else
+            fprintf('Recorded interference: disabled\n');
+        end
         if isnan(result.ber)
             fprintf('BER: n/a (no overlapping decoded bytes)\n');
         else
@@ -133,6 +139,9 @@ function y = simulate_audio_channel(x, p)
         y = y .* (1 + p.am_ripple_depth * sin(2*pi*p.am_ripple_hz*n/p.fs));
     end
 
+    % Optional recorded interference mixed into the passband waveform.
+    y = apply_recorded_interference(y, p);
+
     % AWGN.
     Ps = mean(abs(y).^2);
     Pn = Ps / (10^(p.snr_db/10));
@@ -146,6 +155,100 @@ function y = simulate_audio_channel(x, p)
     if m > 0
         y = 0.85 * y / m;
     end
+end
+
+function y = apply_recorded_interference(y, p)
+    if ~isfield(p, 'interference_file') || isempty(p.interference_file)
+        return;
+    end
+
+    noise = load_cached_interference(char(p.interference_file), p.fs);
+    if isempty(noise)
+        return;
+    end
+
+    needed = numel(y);
+    start_idx = selected_interference_start(p, numel(noise), needed);
+    stop_idx = min(numel(noise), start_idx + needed - 1);
+    chunk = noise(start_idx:stop_idx);
+    if numel(chunk) < needed
+        chunk = [chunk; zeros(needed - numel(chunk), 1)];
+    end
+
+    chunk = chunk - mean(chunk);
+    chunk = normalize_interference_chunk(chunk);
+    y = mix_interference_at_ratio(y, chunk, selected_interference_ratio_db(p));
+end
+
+function start_idx = selected_interference_start(p, total_len, needed_len)
+    max_start = max(1, total_len - needed_len + 1);
+    start_idx = 1;
+    if isfield(p, 'interference_offset_samples') && ~isempty(p.interference_offset_samples)
+        start_idx = 1 + max(0, round(double(p.interference_offset_samples)));
+    elseif isfield(p, 'interference_offset_seconds') && ~isempty(p.interference_offset_seconds)
+        start_idx = 1 + max(0, round(double(p.interference_offset_seconds) * p.fs));
+    end
+    start_idx = min(max_start, max(1, start_idx));
+end
+
+function ratio_db = selected_interference_ratio_db(p)
+    ratio_db = 12;
+    if isfield(p, 'interference_snr_db') && ~isempty(p.interference_snr_db)
+        ratio_db = double(p.interference_snr_db);
+    elseif isfield(p, 'interference_ratio_db') && ~isempty(p.interference_ratio_db)
+        ratio_db = double(p.interference_ratio_db);
+    end
+end
+
+function x = normalize_interference_chunk(x)
+    px = mean(abs(x).^2);
+    if ~isfinite(px) || px <= 0
+        x = zeros(size(x));
+        return;
+    end
+    x = x / sqrt(px);
+end
+
+function y = mix_interference_at_ratio(signal, noise, ratio_db)
+    ps = mean(abs(signal).^2);
+    pn = mean(abs(noise).^2);
+    if ~isfinite(ps) || ps <= 0 || ~isfinite(pn) || pn <= 0
+        y = signal;
+        return;
+    end
+    scale = sqrt(ps / (pn * 10^(ratio_db / 10)));
+    y = signal + scale * noise;
+end
+
+function noise = load_cached_interference(path, target_fs)
+    persistent cache
+    if isempty(cache)
+        cache = struct('path', '', 'fs', [], 'noise', []);
+    end
+
+    if strcmp(cache.path, path) && isequal(cache.fs, target_fs) && ~isempty(cache.noise)
+        noise = cache.noise;
+        return;
+    end
+
+    [noise, fs_noise] = audioread(path);
+    if size(noise, 2) > 1
+        noise = mean(noise, 2);
+    end
+    noise = noise(:);
+    if isempty(noise)
+        cache = struct('path', path, 'fs', target_fs, 'noise', []);
+        return;
+    end
+
+    if fs_noise ~= target_fs
+        [pn, qn] = rat(double(target_fs) / double(fs_noise), 1.0e-9);
+        noise = resample(noise, pn, qn);
+    end
+
+    cache.path = path;
+    cache.fs = target_fs;
+    cache.noise = noise;
 end
 
 function y = apply_echoes(x, p)
@@ -317,6 +420,36 @@ function fig_handles = make_plots(tx_audio, rx_audio, dbg, p)
             title('Wiener weights (real part)');
         end
     end
+
+    if isfield(dbg, 'disturbance_psd') && ~isempty(fieldnames(dbg.disturbance_psd))
+        fig_handles(end+1) = figure('name', 'wiener_psd_diagnostics');
+        if isfield(dbg.disturbance_psd, 'noise_bins') && ~isempty(dbg.disturbance_psd.noise_bins) ...
+                && isfield(dbg.disturbance_psd, 'noise_rx_raw') && ~isempty(dbg.disturbance_psd.noise_rx_raw)
+            subplot(3,1,1);
+            plot(dbg.disturbance_psd.noise_bins, dbg.disturbance_psd.noise_rx_raw, '.-');
+            grid on;
+            xlabel('FFT bin');
+            ylabel('Power');
+            title('Unused-bin disturbance power');
+        end
+        if isfield(dbg.disturbance_psd, 'noise_rx_interp_used') && ~isempty(dbg.disturbance_psd.noise_rx_interp_used)
+            subplot(3,1,2);
+            plot(p.used_bins, dbg.disturbance_psd.noise_rx_interp_used, 'o-');
+            grid on;
+            xlabel('Used FFT bin');
+            ylabel('Power');
+            title('Interpolated disturbance PSD on used bins');
+        end
+        if isfield(dbg, 'wiener_gain_used') && ~isempty(dbg.wiener_gain_used)
+            subplot(3,1,3);
+            stem(p.used_bins, dbg.wiener_gain_used, 'filled');
+            grid on;
+            ylim([0 1.05]);
+            xlabel('Used FFT bin');
+            ylabel('Gain');
+            title('Frequency-domain Wiener gain');
+        end
+    end
 end
 
 function ensure_out_dir(out_dir)
@@ -425,6 +558,11 @@ function p = default_params()
     p.apply_am_ripple = true;
     p.am_ripple_depth = 0.03;
     p.am_ripple_hz = 40;
+    p.interference_file = '';
+    p.interference_offset_samples = 0;
+    p.interference_offset_seconds = [];
+    p.interference_ratio_db = [];
+    p.interference_snr_db = [];
     p.make_plots = true;
     p.pause_before_exit = true;
     p.pause_seconds = -1;

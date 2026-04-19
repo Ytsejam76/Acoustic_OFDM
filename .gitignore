@@ -31,5 +31,6 @@ acoustic*.log
 
 output/
 output_data/
+octave/noise_recordings/
 
 *.md

@@ -6,5 +6,6 @@ function state = ofdm_equalizer_init_state()
     state.residual_curve_est = [];
     state.tap_hist = [];
     state.noise_var_hist = [];
+    state.disturbance_psd_est = [];
     state.wiener_dbg = struct();
 end

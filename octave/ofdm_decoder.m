@@ -552,6 +552,8 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
     dbg.delay_taps_post_denoise = [];
     dbg.wiener_window_used = [];
     dbg.wiener_dbg = struct();
+    dbg.disturbance_psd = struct();
+    dbg.wiener_gain_used = [];
     eq_state = ofdm_equalizer_init_state();
     for i = 1:max_data_ofdm
         s0 = data_start + (i-1)*sym_len;
@@ -565,7 +567,7 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
         Xraw_used = Y(used_bins);
         if has_pilot
             pref = known_pilot_symbols(numel(pilot_bins), i);
-            [Xeq_used, eq_state, eq_dbg] = ofdm_equalize_symbol(Xraw_used, Hest, used_bins, pilot_bins, pref, p, eq_state);
+            [Xeq_used, eq_state, eq_dbg] = ofdm_equalize_symbol(Y, Hest, used_bins, pilot_bins, pref, p, eq_state);
             dbg.pilot_gain_hist(end+1, 1) = eq_dbg.pilot_gain; %#ok<AGROW>
             if isfield(eq_dbg, 'selected_order') && ~isempty(eq_dbg.selected_order)
                 dbg.residual_order_hist(end+1, 1) = eq_dbg.selected_order; %#ok<AGROW>
@@ -584,6 +586,12 @@ function [ok, pkt_info, consumed_bb, dbg] = try_decode_from_sync(rbb, sync_start
             end
             if isfield(eq_dbg, 'wiener_dbg') && ~isempty(fieldnames(eq_dbg.wiener_dbg))
                 dbg.wiener_dbg = eq_dbg.wiener_dbg;
+            end
+            if isfield(eq_dbg, 'disturbance_psd') && ~isempty(fieldnames(eq_dbg.disturbance_psd))
+                dbg.disturbance_psd = eq_dbg.disturbance_psd;
+            end
+            if isfield(eq_dbg, 'wiener_gain_used') && ~isempty(eq_dbg.wiener_gain_used)
+                dbg.wiener_gain_used = eq_dbg.wiener_gain_used;
             end
         else
             Xeq_used = Xraw_used ./ Hest;

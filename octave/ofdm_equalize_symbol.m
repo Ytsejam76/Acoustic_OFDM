@@ -1,6 +1,6 @@
 % Copyright (c) 2026 Elias S. G. Carotti
 
-function [Xeq_used, state, dbg] = ofdm_equalize_symbol(Xraw_used, Hest, used_bins, pilot_bins, pref, p, state)
+function [Xeq_used, state, dbg] = ofdm_equalize_symbol(Xraw_full, Hest, used_bins, pilot_bins, pref, p, state)
 % OFDM_EQUALIZE_SYMBOL  Equalize one OFDM symbol with configurable pilot processing.
 %
 %   [Xeq_used, state, dbg] = ofdm_equalize_symbol(Xraw_used, Hest, used_bins, pilot_bins, pref, p, state)
@@ -10,6 +10,7 @@ function [Xeq_used, state, dbg] = ofdm_equalize_symbol(Xraw_used, Hest, used_bin
     end
 
     dbg = struct();
+    Xraw_used = Xraw_full(used_bins);
     Xeq_used = Xraw_used ./ Hest;
     [has_pilot, pilot_pos, ~] = bin_positions_local(used_bins, pilot_bins, setdiff(used_bins, pilot_bins, 'stable'));
     if ~has_pilot || isempty(pref)
@@ -25,6 +26,13 @@ function [Xeq_used, state, dbg] = ofdm_equalize_symbol(Xraw_used, Hest, used_bin
             Xeq_used(valid) = Xeq_used(valid) ./ residual_curve(valid);
         end
         dbg.residual_var = residual_var;
+    end
+
+    if strcmpi(mode, 'pilot-denoise-wiener-psd')
+        [noise_eq_used, state, psd_dbg] = ofdm_estimate_disturbance_psd(Xraw_full, Hest, used_bins, p, state);
+        [Xeq_used, gain] = apply_frequency_wiener_gain(Xeq_used, noise_eq_used);
+        dbg.disturbance_psd = psd_dbg;
+        dbg.wiener_gain_used = gain;
     end
 
     [g, pilot_residual] = common_pilot_gain(Xeq_used, pilot_pos, pref);
@@ -242,6 +250,15 @@ function [hhat, dbg] = causal_wiener_estimate(y_hist, sigma2)
     dbg.weights = w;
 end
 
+function [Xout, gain] = apply_frequency_wiener_gain(Xin, noise_eq_used)
+    obs_pow = abs(Xin(:)).^2;
+    noise_pow = max(0, noise_eq_used(:));
+    sig_pow = max(0, obs_pow - noise_pow);
+    gain = sig_pow ./ max(1.0e-9, sig_pow + noise_pow);
+    gain = min(1, max(0, gain));
+    Xout = gain .* Xin(:);
+end
+
 function tap_idx = selected_wiener_tap_index(p, ntaps)
     tap_idx = 1;
     if isfield(p, 'wiener_debug_tap') && ~isempty(p.wiener_debug_tap)
@@ -402,7 +419,38 @@ function [fused, state_curve] = temporal_ema_residual_curve(current, prev, p)
     rot = exp(-1j * phase_align);
     current_aligned = current * rot;
     fused = alpha * current_aligned + (1 - alpha) * prev;
+    fused = clamp_temporal_residual_step(fused, current, p);
     state_curve = fused;
+end
+
+function fused = clamp_temporal_residual_step(fused, current, p)
+    mag_slack = 0.12;
+    phase_slack = deg2rad(12);
+    if isfield(p, 'temporal_residual_mag_slack') && ~isempty(p.temporal_residual_mag_slack)
+        mag_slack = max(0.0, double(p.temporal_residual_mag_slack));
+    end
+    if isfield(p, 'temporal_residual_phase_slack_deg') && ~isempty(p.temporal_residual_phase_slack_deg)
+        phase_slack = deg2rad(max(0.0, double(p.temporal_residual_phase_slack_deg)));
+    end
+
+    curr_mag = abs(current(:));
+    curr_phase = angle(current(:));
+    fused_mag = abs(fused(:));
+    fused_phase = angle(fused(:));
+
+    mag_lo = max(0.75, curr_mag * (1 - mag_slack));
+    mag_hi = min(1.5, curr_mag * (1 + mag_slack));
+    fused_mag = min(mag_hi, max(mag_lo, fused_mag));
+
+    phase_delta = wrap_to_pi_local(fused_phase - curr_phase);
+    phase_delta = min(phase_slack, max(-phase_slack, phase_delta));
+    fused_phase = curr_phase + phase_delta;
+
+    fused = reshape(fused_mag .* exp(1j * fused_phase), size(current));
+end
+
+function phi = wrap_to_pi_local(phi)
+    phi = mod(phi + pi, 2 * pi) - pi;
 end
 
 function delta = common_phase_delta(reference, current)

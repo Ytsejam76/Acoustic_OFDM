@@ -195,7 +195,7 @@ end
 
 function cfg = default_cfg()
     cfg = struct();
-    cfg.equalizer_modes = {'pilot-denoise', 'pilot-denoise-temporal', 'pilot-denoise-wiener'};
+    cfg.equalizer_modes = {'pilot-denoise', 'pilot-denoise-temporal', 'pilot-denoise-wiener', 'pilot-denoise-wiener-psd'};
     cfg.num_trials = 20;
     cfg.oracle_sync = true;
     cfg.show_progress = true;
@@ -234,6 +234,9 @@ function p = default_base_params()
     p.use_pilots = [];
     p.equalizer_mode = 'training-pilot';
     p.temporal_window = 4;
+    p.disturbance_temporal_alpha = 0.75;
+    p.disturbance_freq_smooth = 5;
+    p.disturbance_psd_gain = 1.0;
     p.residual_tap_order_mode = 'all';
     p.residual_tap_order = 1;
     p.residual_tap_order_max = 7;

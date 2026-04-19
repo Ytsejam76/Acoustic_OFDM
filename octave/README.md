@@ -29,6 +29,7 @@ The decoder parameter struct accepts `p.equalizer_mode` with these values:
 - `pilot-denoise-mdl`
 - `pilot-denoise-temporal`
 - `pilot-denoise-wiener`
+- `pilot-denoise-wiener-psd`
 - `pilot-denoise-wiener-shrink`
 
 ## Current design rationale
@@ -67,6 +68,20 @@ This is the current clean temporal Wiener experiment:
 The point of this mode is to test a more agnostic temporal MMSE-style baseline
 without imposing explicit low-order delay structure.
 
+### `pilot-denoise-wiener-psd`
+
+This is a separate frequency-domain Wiener experiment:
+
+- use all unused FFT bins as measurements of residual non-signal energy
+- smooth that disturbance estimate across frequency and time
+- interpolate it onto the active bins
+- map it into the equalized domain with `|H[k]|^2`
+- apply a Wiener-like gain on the equalized subcarriers
+
+This mode is the current baseline for "use all the bins" thinking. It avoids
+delay-tap model assumptions and instead uses the unused spectrum as a
+disturbance sensor field.
+
 ### `pilot-denoise-wiener-shrink`
 
 This is the older hybrid experiment:
@@ -92,7 +107,7 @@ delay-domain basis.
 From the repository root:
 
 ```bash
-octave --quiet --eval "addpath('octave'); p=struct(); p.equalizer_mode='pilot-denoise-wiener'; p.modulation='QPSK'; p.use_pilots=true; p.used_bins=[2 3 4 5 6 7 8 9]; p.pilot_bins=[2 4 7 9]; p.pause_before_exit=false; p.make_plots=true; p.save_images=true; p.out_dir='output/octave_eq'; p.save_decoder_constellation=true; p.verbose=true; ofdm_test_channel(p);"
+octave --quiet --eval "addpath('octave'); p=struct(); p.equalizer_mode='pilot-denoise-wiener-psd'; p.modulation='QPSK'; p.use_pilots=true; p.used_bins=[2 3 4 5 6 7 8 9]; p.pilot_bins=[2 4 7 9]; p.pause_before_exit=false; p.make_plots=true; p.save_images=true; p.out_dir='output/octave_eq'; p.save_decoder_constellation=true; p.verbose=true; ofdm_test_channel(p);"
 ```
 
 ## Running the equalizer comparison sweep
@@ -100,7 +115,7 @@ octave --quiet --eval "addpath('octave'); p=struct(); p.equalizer_mode='pilot-de
 Use the dedicated sweep helper:
 
 ```bash
-octave --quiet --eval "addpath('octave'); cfg=struct(); cfg.num_trials=20; cfg.show_progress=true; cfg.make_octave_plots=true; cfg.save_plot=true; cfg.out_dir='output/octave_eq'; cfg.plot_filename='equalizer_sweep.png'; cfg.oracle_sync=true; cfg.equalizer_modes={'pilot-denoise','pilot-denoise-temporal','pilot-denoise-wiener'}; cfg.base_params=struct(); cfg.base_params.modulation='QPSK'; cfg.base_params.use_pilots=true; cfg.base_params.used_bins=[2 3 4 5 6 7 8 9]; cfg.base_params.pilot_bins=[2 4 7 9]; ofdm_equalizer_sweep(cfg);"
+octave --quiet --eval "addpath('octave'); cfg=struct(); cfg.num_trials=20; cfg.show_progress=true; cfg.make_octave_plots=true; cfg.save_plot=true; cfg.out_dir='output/octave_eq'; cfg.plot_filename='equalizer_sweep.png'; cfg.oracle_sync=true; cfg.equalizer_modes={'pilot-denoise','pilot-denoise-temporal','pilot-denoise-wiener','pilot-denoise-wiener-psd'}; cfg.base_params=struct(); cfg.base_params.modulation='QPSK'; cfg.base_params.use_pilots=true; cfg.base_params.used_bins=[2 3 4 5 6 7 8 9]; cfg.base_params.pilot_bins=[2 4 7 9]; ofdm_equalizer_sweep(cfg);"
 ```
 
 This saves:
@@ -108,13 +123,51 @@ This saves:
 - `output/octave_eq/equalizer_sweep.png`
 - `output/octave_eq/equalizer_sweep_stats.mat`
 
+## Running against recorded interference
+
+Recorded ambient audio can be mixed into the passband waveform offline through
+`p.interference_file`. The intended local folder is:
+
+- `octave/noise_recordings/`
+
+That directory is ignored by Git so local captures never get committed.
+
+For one run with a fixed chunk:
+
+```bash
+octave --quiet --eval "addpath('octave'); p=struct(); p.equalizer_mode='pilot-denoise-wiener-psd'; p.interference_file='octave/noise_recordings/interference.wav'; p.interference_ratio_db=12; p.interference_offset_seconds=1.5; p.make_plots=true; p.save_images=false; p.pause_before_exit=false; ofdm_test_channel(p);"
+```
+
+For a repeatable chunk sweep across modes:
+
+```bash
+octave --quiet --eval "addpath('octave'); cfg=struct(); cfg.num_chunks=8; cfg.interference_file='octave/noise_recordings/interference.wav'; cfg.interference_ratio_db=12; cfg.chunk_advance_samples=12000; cfg.equalizer_modes={'pilot-denoise','pilot-denoise-temporal','pilot-denoise-wiener-psd'}; ofdm_recorded_interference_sweep(cfg);"
+```
+
+This uses the same chunk offsets for every mode so the comparison stays fair.
+
+For saved plots on the same recorded segments across multiple modes:
+
+```bash
+RUN_KIND=compare \
+  NUM_SEGMENTS=3 \
+  CHUNK_ADVANCE_SAMPLES=12000 \
+  SAVE_IMAGES=true \
+  OUT_DIR=output/octave_recorded_compare \
+  bash scripts/octave_recorded_interference.sh
+```
+
+This saves one directory per `(segment, mode)` pair and also writes a
+`summary.tsv` file in the chosen output root.
+
 ## Current recommendation
 
 For exploratory work, start with:
 
 1. `pilot-denoise`
 2. `pilot-denoise-temporal`
-3. `pilot-denoise-wiener`
+3. `pilot-denoise-wiener-psd`
+4. `pilot-denoise-wiener`
 
 Only use `pilot-denoise-mdl` or `pilot-denoise-wiener-shrink` as comparison
 experiments, not as default directions.
